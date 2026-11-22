@@ -33,13 +33,15 @@ For each theorem and each strategy:
 | strategy | what the rebuilding model sees |
 |---|---|
 | `none` | the statement only (baseline: how much can it prove unaided, or from memory?) |
+| `decoy` | the statement + the `flat` explanation of a *different* benchmark theorem (control) |
 | `flat` | the statement + an explanation written in one pass from the whole proof |
 | `recursive` | the statement + an explanation built bottom-up over the proof tree |
 
 and, for `flat`/`recursive`, a **masked** variant in which every library lemma name from the original
 proof (and any code block) is removed from the explanation.
 
-Reported per strategy: rebuild success rate, theorems gained/lost against the `none` baseline,
+Reported per strategy: rebuild success rate, theorems gained/lost against the `none` baseline
+and against the `decoy` control,
 **leakage** (fraction of the proof's lemma names that appear verbatim in the explanation), explanation length,
 and the number of explainer calls.
 
@@ -48,6 +50,11 @@ Why these controls:
 - **Memorisation.** Mathlib is in every model's training data. The `none` baseline measures what the
   rebuilder can do without help; the interesting number is the gain over it. For a cleaner test, use
   theorems added to Mathlib after the models' training cut-off.
+- **Form vs. content.** A rebuilder may do better simply because the prompt is longer or sounds
+  confident, or it may ignore the explanation altogether. The `decoy` control gives it a real
+  explanation of the wrong theorem (the next benchmark theorem from a different file, so the pairing
+  is deterministic and reuses the cached `flat` explanation). An explanation strategy is only
+  conveying something about *this* proof if it beats `decoy`, not just `none`.
 - **Leakage.** An "explanation" that lists the exact lemmas is a disguised copy of the code. Leakage is
   reported, and the masked condition tests whether the explanation still works once names are gone.
 - **Honest checking.** A candidate proof replaces the original inside a copy of its own Mathlib file,
@@ -68,6 +75,10 @@ lake update                 # fetches Mathlib v4.36.0 (pinned in lean/lakefile.t
 lake exe cache get          # downloads prebuilt Mathlib; skip if it fails, see below
 cd ..
 ```
+
+On a machine where `releases.lean-lang.org` or the Mathlib cache are unreachable but GitHub is not,
+`scripts/setup_lean.sh [bench.toml ...]` does all of this: it installs elan, fetches the pinned toolchain
+from the GitHub release assets, runs `lake update`, and builds only the modules the benchmark needs.
 
 If the Mathlib cache is unavailable, build only what the benchmark needs. The pilot set was chosen
 from files with small import closures (about 1,100 modules in total):
@@ -91,7 +102,7 @@ OpenAI-compatible endpoint), then:
 python -m lpe run benchmarks/pilot.toml \
     --explainer anthropic:claude-opus-5-5 \
     --reconstructor anthropic:claude-haiku-5-5 \
-    --strategies none,flat,recursive --mask both \
+    --strategies none,decoy,flat,recursive --mask both \
     --samples 1 --feedback 1 \
     --out results/pilot.jsonl
 
@@ -118,13 +129,15 @@ candidate proof.
 
 ```
 lpe/extract.py      find a declaration in a Lean file, split statement/proof, build the proof tree
-lpe/explain.py      explanation strategies (none / flat / recursive), leakage and masking
+lpe/explain.py      explanation strategies (none / decoy / flat / recursive), leakage and masking
 lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-error feedback
 lpe/lean_check.py   splice a candidate into its original file and compile it
 lpe/llm.py          small Anthropic / OpenAI-compatible clients with an on-disk cache
 lpe/imports.py      import closures, to pick theorems that are cheap to check
 lpe/cli.py          select · sanity · explain · run · report
 benchmarks/         theorem lists (TOML)
+scripts/            setup_lean.sh: toolchain + Mathlib build without the release/cache servers
+docs/               ROADMAP.md (planned work), LOG.md (what changed when), literature.md
 lean/               Lean project pinned to Mathlib v4.36.0
 tests/              unit tests and a core-Lean fixture (no Mathlib needed)
 ```
@@ -139,11 +152,7 @@ tests/              unit tests and a core-Lean fixture (no Mathlib needed)
 
 ## Roadmap
 
-1. **Pilot** (this version): does the recursive explanation beat flat and no explanation on ~12 mid-sized theorems?
-2. **Goal states**: give the explainer the proof state before and after each step.
-3. **Contrastive "why"**: for a step, try alternative tactics in Lean and ask the explainer why they fail,
-   in the spirit of comparing candidate moves.
-4. **Training**: use rebuild success (minus leakage) as a reward; distil the explanations that work
-   back into an explainer model, and iterate.
-5. **Scale**: hierarchical explanations of long developments, where the explanation of a file is built
-   from the explanations of its lemmas.
+The prioritised plan lives in [docs/ROADMAP.md](docs/ROADMAP.md); related work, and what each paper
+suggests for this project, in [docs/literature.md](docs/literature.md). In short: run the pilot with
+real models, then ground explanations in Lean goal states, add stronger faithfulness controls
+(corrupted steps, step-level rebuilds), and use rebuild success minus leakage as a training signal.
