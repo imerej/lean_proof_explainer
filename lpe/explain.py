@@ -8,6 +8,11 @@
              the final one. This is the proof analogue of the "explain the position
              from the explanations of the positions after it" update used to train
              chess explainers.
+  decoy      control: the flat explanation of a *different* theorem from the same
+             benchmark. Rebuild success with a decoy measures how much an explanation
+             helps through its form alone (a longer prompt, a confident tone, generic
+             proof advice) rather than through its content. A strategy that does not
+             beat `decoy` is not conveying anything about the proof. See `decoy_explanation`.
 """
 
 from __future__ import annotations
@@ -69,7 +74,38 @@ def explain(decl: Declaration, strategy: str, llm: LLM | None, min_children: int
         return Explanation("flat", llm.chat(FLAT_SYSTEM, user), calls=1)
     if strategy == "recursive":
         return _recursive(decl, llm, min_children)
+    if strategy == "decoy":
+        raise ValueError("the decoy strategy needs a donor theorem; use decoy_explanation()")
     raise ValueError(f"unknown strategy {strategy!r}")
+
+
+def decoy_explanation(donor: Declaration, llm: LLM | None) -> Explanation:
+    """The flat explanation of `donor`, to be shown to the rebuilder of another theorem.
+
+    Uses exactly the flat prompt, so it shares the cache with the donor's own `flat` row and
+    has the same length and style distribution as a real flat explanation.
+    """
+    if llm is None:
+        raise ValueError("strategy 'decoy' needs an explainer model")
+    ex = explain(donor, "flat", llm)
+    return Explanation("decoy", ex.text, calls=ex.calls, trace=[{"node": "donor", "name": donor.name}])
+
+
+def pick_donor(files: list[str], index: int) -> int:
+    """Index of the theorem whose explanation serves as the decoy for theorem `index`.
+
+    The next theorem (cyclically) from a different file, so that the donor is unlikely to be a
+    sibling lemma whose explanation happens to help; falls back to the next theorem when every
+    theorem comes from the same file. Deterministic, so reruns pair the same theorems.
+    """
+    n = len(files)
+    if n < 2:
+        raise ValueError("the decoy strategy needs at least two theorems in the benchmark")
+    for step in range(1, n):
+        j = (index + step) % n
+        if files[j] != files[index]:
+            return j
+    return (index + 1) % n
 
 
 def _recursive(decl: Declaration, llm: LLM, min_children: int) -> Explanation:

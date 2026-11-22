@@ -11,7 +11,7 @@ import tomllib
 from collections import defaultdict
 from pathlib import Path
 
-from .explain import explain, leakage, mask_identifiers
+from .explain import decoy_explanation, explain, leakage, mask_identifiers, pick_donor
 from .extract import find_declaration
 from .lean_check import LeanChecker
 from .llm import LLM
@@ -119,17 +119,24 @@ def cmd_run(args) -> None:
             r = json.loads(line)
             done.add((r["theorem"], r["strategy"], r["masked"]))
 
+    bench = list(load_bench(Path(args.bench), project))
+    files = [entry["file"] for entry, _ in bench]
     with out.open("a", encoding="utf-8") as fh:
-        for entry, decl in load_bench(Path(args.bench), project):
+        for i, (entry, decl) in enumerate(bench):
             for strategy in strategies:
                 for masked in ([False, True] if args.mask == "both" else [args.mask == "on"]):
-                    if strategy == "none" and masked:
+                    # Masking removes the theorem's own lemma names; it is meaningless for the
+                    # baseline and for a decoy explanation written about another theorem.
+                    if strategy in ("none", "decoy") and masked:
                         continue
                     key = (entry["name"], strategy, masked)
                     if key in done:
                         continue
                     t0 = time.monotonic()
-                    ex = explain(decl, strategy, explainer, min_children=args.min_children)
+                    if strategy == "decoy":
+                        ex = decoy_explanation(bench[pick_donor(files, i)][1], explainer)
+                    else:
+                        ex = explain(decl, strategy, explainer, min_children=args.min_children)
                     text = mask_identifiers(decl, ex.text) if masked else ex.text
                     leak = leakage(decl, text)
                     rec = reconstruct(
@@ -173,7 +180,7 @@ def cmd_report(args) -> None:
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         groups[(r["strategy"], r["masked"])].append(r)
-    order = {"none": 0, "flat": 1, "recursive": 2}
+    order = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3}
     print("| strategy | masked | n | rebuilt | success | mean leak | mean chars | explainer calls |")
     print("|---|---|---|---|---|---|---|---|")
     for (strategy, masked), rs in sorted(groups.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1])):
@@ -188,12 +195,20 @@ def cmd_report(args) -> None:
     by_thm: dict[str, dict] = defaultdict(dict)
     for r in rows:
         by_thm[r["theorem"]][(r["strategy"], r["masked"])] = r["success"]
-    if any(("none", False) in v for v in by_thm.values()):
-        print("\nGain over the no-explanation baseline (theorems rebuilt only with an explanation):")
-        for key in sorted({k for v in by_thm.values() for k in v if k[0] != "none"}):
-            gained = [t for t, v in by_thm.items() if v.get(key) and not v.get(("none", False))]
-            lost = [t for t, v in by_thm.items() if v.get(("none", False)) and key in v and not v[key]]
-            print(f"- {key[0]}{' (masked)' if key[1] else ''}: +{len(gained)} / -{len(lost)}")
+    baselines = [
+        (("none", False), "Gain over the no-explanation baseline (theorems rebuilt only with an explanation):"),
+        (("decoy", False), "Gain over the decoy control (an explanation of a different theorem):"),
+    ]
+    for base, title in baselines:
+        if not any(base in v for v in by_thm.values()):
+            continue
+        print(f"\n{title}")
+        for key in sorted({k for v in by_thm.values() for k in v if k != base and k[0] != "none"}):
+            # Only theorems that have both rows are compared.
+            pairs = [(v[key], v[base]) for v in by_thm.values() if key in v and base in v]
+            gained = sum(1 for a, b in pairs if a and not b)
+            lost = sum(1 for a, b in pairs if b and not a)
+            print(f"- {key[0]}{' (masked)' if key[1] else ''}: +{gained} / -{lost}  (n={len(pairs)})")
 
 
 # ------------------------------------------------------------------ main
@@ -233,7 +248,11 @@ def main(argv: list[str] | None = None) -> None:
 
     s = sub.add_parser("run", help="explain, reconstruct, and check")
     s.add_argument("bench")
-    s.add_argument("--strategies", default="none,flat,recursive")
+    s.add_argument(
+        "--strategies",
+        default="none,flat,recursive",
+        help="comma-separated: none, decoy, flat, recursive (decoy = another theorem's flat explanation)",
+    )
     s.add_argument("--explainer", help="model for explanations, e.g. anthropic:claude-opus-5-5")
     s.add_argument("--reconstructor", required=True, help="model that rebuilds proofs")
     s.add_argument("--mask", choices=["off", "on", "both"], default="both", help="mask Lean identifiers in explanations")
