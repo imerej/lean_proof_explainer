@@ -1,0 +1,58 @@
+# Pilot set: 12 mid-sized tactic proofs (8–30 lines) with real mathematical content,
+# from elementary number theory and combinatorics in Mathlib v4.36.0.
+# Chosen by hand from files with small import closures, so they can be checked
+# after building only part of Mathlib.
+
+[[theorem]]
+name = "Nat.choose_mul"
+file = "Mathlib/Data/Nat/Choose/Basic.lean"
+note = "n choose k times k choose s equals n choose s times (n-s) choose (k-s)"
+
+[[theorem]]
+name = "Nat.add_factorial_succ_le_factorial_add_succ"
+file = "Mathlib/Data/Nat/Factorial/Basic.lean"
+
+[[theorem]]
+name = "Nat.findGreatest_eq_iff"
+file = "Mathlib/Data/Nat/Find.lean"
+
+[[theorem]]
+name = "Nat.ModEq.cancel_left_div_gcd"
+file = "Mathlib/Data/Nat/ModEq.lean"
+note = "cancelling a common factor in a congruence"
+
+[[theorem]]
+name = "Nat.pow_sub_one_mod_pow_sub_one"
+file = "Mathlib/Data/Nat/GCD/Basic.lean"
+note = "(x^m - 1) mod (x^n - 1) = x^(m mod n) - 1"
+
+[[theorem]]
+name = "Finset.card_eq_of_bijective"
+file = "Mathlib/Data/Finset/Card.lean"
+
+[[theorem]]
+name = "Nat.digits_ofDigits"
+file = "Mathlib/Data/Nat/Digits/Defs.lean"
+note = "digits are recovered from the number they represent"
+
+[[theorem]]
+name = "Nat.gcd_fib_add_self"
+file = "Mathlib/Data/Nat/Fib/Basic.lean"
+
+[[theorem]]
+name = "Nat.sum_properDivisors_eq_one_iff_prime"
+file = "Mathlib/NumberTheory/Divisors.lean"
+
+[[theorem]]
+name = "Commute.add_pow"
+file = "Mathlib/Data/Nat/Choose/Sum.lean"
+note = "binomial theorem for commuting elements"
+
+[[theorem]]
+name = "Nat.exists_eq_pow_of_exponent_coprime_of_pow_eq_pow"
+file = "Mathlib/Data/Nat/Factorization/Basic.lean"
+
+[[theorem]]
+name = "Nat.totient_eq_iff_prime"
+note = "phi(p) = p - 1 iff p is prime"
+file = "Mathlib/Data/Nat/Totient.lean"

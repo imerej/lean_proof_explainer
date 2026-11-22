@@ -1,0 +1,174 @@
+"""Explanation strategies.
+
+  none       no explanation; the reconstructor sees only the statement (baseline)
+  flat       one call: the whole proof in, one explanation out
+  recursive  bottom-up over the proof tree. Each composite step is explained from
+             its own code plus the already-written explanations of its sub-steps,
+             with those sub-steps collapsed to one line. The root's explanation is
+             the final one. This is the proof analogue of the "explain the position
+             from the explanations of the positions after it" update used to train
+             chess explainers.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from .extract import Declaration, ProofNode, lemma_identifiers, parse_proof_tree
+from .llm import LLM
+
+STYLE_RULES = """\
+Write for a mathematician who does not read Lean.
+- Use ordinary mathematical language and LaTeX-style notation ($...$).
+- Do not quote Lean code, tactic names (simp, linarith, rw, omega, ...), or library lemma names. \
+Describe the fact a lemma states instead of naming it.
+- Say WHY each move is made: what it reduces the goal to, and why the obvious alternatives would not work as well.
+- State every intermediate claim precisely enough that a reader could re-prove it."""
+
+FINAL_FORMAT = """\
+Structure the answer as:
+1. **Statement.** The theorem in words.
+2. **Idea.** The key idea of the proof in two or three sentences, and why this route was chosen.
+3. **Proof outline.** Numbered steps. For each: the claim, and the argument for it in a sentence or two.
+4. **Where the difficulty is.** The step a reader would most likely get stuck on, and the trick that resolves it."""
+
+FLAT_SYSTEM = f"You explain formal proofs written in Lean 4 with Mathlib.\n\n{STYLE_RULES}\n\n{FINAL_FORMAT}"
+
+NODE_SYSTEM = f"""You explain one part of a formal Lean 4 proof. Sub-steps that were already explained are \
+collapsed to a single line marked ⟦step k⟧, and their explanations are given to you.
+Explain what this part establishes and how, building on the sub-step explanations rather than repeating them.
+Be concise: a short paragraph, or a few numbered points for a long part.
+
+{STYLE_RULES}"""
+
+ROOT_SYSTEM = f"""You explain a formal Lean 4 proof. Sub-steps that were already explained are collapsed \
+to a single line marked ⟦step k⟧, and their explanations are given to you. Combine them into one coherent \
+explanation of the whole proof. Keep every intermediate claim; drop Lean-specific bookkeeping.
+
+{STYLE_RULES}
+
+{FINAL_FORMAT}"""
+
+
+@dataclass
+class Explanation:
+    strategy: str
+    text: str
+    calls: int = 0
+    trace: list[dict] = field(default_factory=list)  # per-node explanations for the recursive strategy
+
+
+def explain(decl: Declaration, strategy: str, llm: LLM | None, min_children: int = 1) -> Explanation:
+    if strategy == "none":
+        return Explanation("none", "")
+    if llm is None:
+        raise ValueError(f"strategy {strategy!r} needs an explainer model")
+    if strategy == "flat":
+        user = f"Theorem:\n```lean\n{decl.statement_in_context}\n```\n\nProof:\n```lean\n{decl.proof}\n```"
+        return Explanation("flat", llm.chat(FLAT_SYSTEM, user), calls=1)
+    if strategy == "recursive":
+        return _recursive(decl, llm, min_children)
+    raise ValueError(f"unknown strategy {strategy!r}")
+
+
+def _recursive(decl: Declaration, llm: LLM, min_children: int) -> Explanation:
+    root = parse_proof_tree(decl.proof)
+    out = Explanation("recursive", "")
+    counter = [0]
+
+    def visit(node: ProofNode, depth: int) -> tuple[str, str]:
+        """Return (collapsed code for this node, explanation or '' if not explained separately)."""
+        child_codes: list[str] = []
+        notes: list[str] = []
+        for child in node.children:
+            code, expl = visit(child, depth + 1)
+            child_codes.append(code)
+            if expl:
+                notes.append(expl)
+        is_root = node is root
+        worth_explaining = is_root or len(node.children) >= min_children
+        own_code = node.text
+        body = "\n".join("  " + line for code in child_codes for line in code.splitlines())
+        code_here = body if is_root else f"{own_code}\n{body}" if body else own_code
+        if not worth_explaining:
+            return code_here, ""
+
+        notes_text = "\n\n".join(notes) if notes else "(none)"
+        if is_root:
+            user = (
+                f"Theorem:\n```lean\n{decl.statement_in_context}\n```\n\n"
+                f"Proof, with sub-steps collapsed:\n```lean\n{_dedent(code_here)}\n```\n\n"
+                f"Explanations of the collapsed sub-steps:\n\n{notes_text}"
+            )
+            text = llm.chat(ROOT_SYSTEM, user)
+            out.calls += 1
+            out.trace.append({"node": "root", "code": code_here, "explanation": text})
+            return code_here, text
+
+        counter[0] += 1
+        k = counter[0]
+        user = (
+            f"The theorem being proved:\n```lean\n{decl.statement_in_context}\n```\n\n"
+            f"This part of the proof:\n```lean\n{code_here}\n```\n\n"
+            f"Explanations of its collapsed sub-steps:\n\n{notes_text}"
+        )
+        text = llm.chat(NODE_SYSTEM, user)
+        out.calls += 1
+        out.trace.append({"node": f"step {k}", "code": code_here, "explanation": text})
+        return f"{own_code}  -- ⟦step {k}⟧ (details collapsed)", f"⟦step {k}⟧ {text}"
+
+    _, out.text = visit(root, 0)
+    return out
+
+
+def _dedent(text: str) -> str:
+    lines = text.splitlines()
+    widths = [len(line) - len(line.lstrip()) for line in lines if line.strip()]
+    cut = min(widths) if widths else 0
+    return "\n".join(line[cut:] for line in lines)
+
+
+# ---------------------------------------------------------------- leakage
+
+
+@dataclass
+class Leakage:
+    identifiers_total: int
+    identifiers_leaked: int
+    code_blocks: int
+
+    @property
+    def rate(self) -> float:
+        return self.identifiers_leaked / self.identifiers_total if self.identifiers_total else 0.0
+
+
+def leakage(decl: Declaration, text: str) -> Leakage:
+    """How much of the proof's Lean vocabulary survives verbatim in the explanation.
+
+    A high rate means the explanation may be a disguised copy of the code, so
+    reconstruction success would say little about understanding.
+    """
+    idents = lemma_identifiers(decl.proof)
+    leaked = {i for i in idents if any(_mentions(text, form) for form in _forms(i))}
+    return Leakage(len(idents), len(leaked), text.count("```"))
+
+
+def mask_identifiers(decl: Declaration, text: str) -> str:
+    """Replace any library identifier from the original proof (and any code block) in `text`."""
+    text = re.sub(r"```.*?```", "[code removed]", text, flags=re.S)
+    for ident in sorted(lemma_identifiers(decl.proof), key=len, reverse=True):
+        for form in _forms(ident):
+            text = re.sub(rf"(?<![\w'\\]){re.escape(form)}(?![\w'])", "[lemma]", text)
+    return text
+
+
+def _forms(ident: str) -> list[str]:
+    """The full name, plus the last component when it is a distinctive snake_case name."""
+    last = ident.split(".")[-1]
+    return [ident, last] if "_" in last and last != ident else [ident]
+
+
+def _mentions(text: str, form: str) -> bool:
+    # The backslash guard keeps LaTeX such as \le or \sum from counting as a mention.
+    return re.search(rf"(?<![\w'\\]){re.escape(form)}(?![\w'])", text) is not None

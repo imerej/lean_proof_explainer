@@ -1,0 +1,23 @@
+[project]
+name = "lean-proof-explainer"
+version = "0.1.0"
+description = "Recursive natural-language explanations of Lean proofs, evaluated by rebuilding the proof from the explanation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+lpe = "lpe.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["lpe"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
