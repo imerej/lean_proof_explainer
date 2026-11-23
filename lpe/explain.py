@@ -8,6 +8,10 @@
              the final one. This is the proof analogue of the "explain the position
              from the explanations of the positions after it" update used to train
              chess explainers.
+  grounded   the recursive pass, with Lean's goal state before each explained part and
+             after each of its sub-steps added to every prompt (see `goals.py`). Needs the
+             states from `GoalExtractor`; the tree is the same as for `recursive`, so the two
+             differ only in what the explainer sees.
   decoy      control: the flat explanation of a *different* theorem from the same
              benchmark. Rebuild success with a decoy measures how much an explanation
              helps through its form alone (a longer prompt, a confident tone, generic
@@ -21,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 
 from .extract import Declaration, ProofNode, lemma_identifiers, parse_proof_tree
+from .goals import ProofStates, annotate
 from .llm import LLM
 
 STYLE_RULES = """\
@@ -44,12 +49,15 @@ NODE_SYSTEM = f"""You explain one part of a formal Lean 4 proof. Sub-steps that 
 collapsed to a single line marked ⟦step k⟧, and their explanations are given to you.
 Explain what this part establishes and how, building on the sub-step explanations rather than repeating them.
 Be concise: a short paragraph, or a few numbered points for a long part.
+When Lean's goal states are given, use them to state precisely what is known and what remains \
+to be shown at each point, but translate them into ordinary mathematics; do not copy them.
 
 {STYLE_RULES}"""
 
 ROOT_SYSTEM = f"""You explain a formal Lean 4 proof. Sub-steps that were already explained are collapsed \
 to a single line marked ⟦step k⟧, and their explanations are given to you. Combine them into one coherent \
 explanation of the whole proof. Keep every intermediate claim; drop Lean-specific bookkeeping.
+When Lean's goal states are given, use them to state intermediate claims precisely, in ordinary mathematics.
 
 {STYLE_RULES}
 
@@ -64,7 +72,13 @@ class Explanation:
     trace: list[dict] = field(default_factory=list)  # per-node explanations for the recursive strategy
 
 
-def explain(decl: Declaration, strategy: str, llm: LLM | None, min_children: int = 1) -> Explanation:
+def explain(
+    decl: Declaration,
+    strategy: str,
+    llm: LLM | None,
+    min_children: int = 1,
+    states: ProofStates | None = None,
+) -> Explanation:
     if strategy == "none":
         return Explanation("none", "")
     if llm is None:
@@ -74,6 +88,11 @@ def explain(decl: Declaration, strategy: str, llm: LLM | None, min_children: int
         return Explanation("flat", llm.chat(FLAT_SYSTEM, user), calls=1)
     if strategy == "recursive":
         return _recursive(decl, llm, min_children)
+    if strategy == "grounded":
+        if states is None or not states.tactics:
+            reason = states.error if states is not None else "no goal states given"
+            raise ValueError(f"strategy 'grounded' needs goal states for {decl.name}: {reason}")
+        return _recursive(decl, llm, min_children, states=states, name="grounded")
     if strategy == "decoy":
         raise ValueError("the decoy strategy needs a donor theorem; use decoy_explanation()")
     raise ValueError(f"unknown strategy {strategy!r}")
@@ -108,9 +127,11 @@ def pick_donor(files: list[str], index: int) -> int:
     return (index + 1) % n
 
 
-def _recursive(decl: Declaration, llm: LLM, min_children: int) -> Explanation:
+def _recursive(
+    decl: Declaration, llm: LLM, min_children: int, states: ProofStates | None = None, name: str = "recursive"
+) -> Explanation:
     root = parse_proof_tree(decl.proof)
-    out = Explanation("recursive", "")
+    out = Explanation(name, "")
     counter = [0]
 
     def visit(node: ProofNode, depth: int) -> tuple[str, str]:
@@ -131,11 +152,12 @@ def _recursive(decl: Declaration, llm: LLM, min_children: int) -> Explanation:
             return code_here, ""
 
         notes_text = "\n\n".join(notes) if notes else "(none)"
+        goal_text = f"\n\nLean's goal states for this part:\n\n{annotate(node, states)}" if states else ""
         if is_root:
             user = (
                 f"Theorem:\n```lean\n{decl.statement_in_context}\n```\n\n"
                 f"Proof, with sub-steps collapsed:\n```lean\n{_dedent(code_here)}\n```\n\n"
-                f"Explanations of the collapsed sub-steps:\n\n{notes_text}"
+                f"Explanations of the collapsed sub-steps:\n\n{notes_text}{goal_text}"
             )
             text = llm.chat(ROOT_SYSTEM, user)
             out.calls += 1
@@ -147,7 +169,7 @@ def _recursive(decl: Declaration, llm: LLM, min_children: int) -> Explanation:
         user = (
             f"The theorem being proved:\n```lean\n{decl.statement_in_context}\n```\n\n"
             f"This part of the proof:\n```lean\n{code_here}\n```\n\n"
-            f"Explanations of its collapsed sub-steps:\n\n{notes_text}"
+            f"Explanations of its collapsed sub-steps:\n\n{notes_text}{goal_text}"
         )
         text = llm.chat(NODE_SYSTEM, user)
         out.calls += 1

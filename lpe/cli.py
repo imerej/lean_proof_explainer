@@ -12,7 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from .explain import decoy_explanation, explain, leakage, mask_identifiers, pick_donor
-from .extract import find_declaration
+from .extract import find_declaration, parse_proof_tree
+from .goals import GoalExtractor, render_goals, step_view
 from .lean_check import LeanChecker
 from .llm import LLM
 from .reconstruct import reconstruct
@@ -93,13 +94,53 @@ def cmd_sanity(args) -> None:
 
 def cmd_explain(args) -> None:
     llm = LLM(args.explainer, cache_dir=Path(args.cache))
+    goals = _goal_extractor(args) if args.strategy == "grounded" else None
     for entry, decl in load_bench(Path(args.bench), args.project):
         if args.theorem and entry["name"] != args.theorem:
             continue
-        ex = explain(decl, args.strategy, llm, min_children=args.min_children)
+        states = goals.states(decl) if goals else None
+        ex = explain(decl, args.strategy, llm, min_children=args.min_children, states=states)
         leak = leakage(decl, ex.text)
         print(f"## {entry['name']}  [{args.strategy}, {ex.calls} calls, leakage {leak.rate:.0%}]\n")
         print(ex.text, "\n")
+
+
+# ------------------------------------------------------------------ goals
+
+
+def _goal_extractor(args) -> GoalExtractor:
+    return GoalExtractor(args.project, timeout=args.timeout, cache_dir=Path(args.cache).parent / "goals")
+
+
+def cmd_goals(args) -> None:
+    """Print each proof step with Lean's goal state after it (what `grounded` shows the explainer)."""
+    extractor = _goal_extractor(args)
+    for entry, decl in load_bench(Path(args.bench), args.project):
+        if args.theorem and entry["name"] != args.theorem:
+            continue
+        states = extractor.states(decl)
+        print(f"## {entry['name']}  ({len(states.tactics)} tactic states)\n")
+        if states.error:
+            print(f"goal extraction failed:\n{states.error}\n")
+            continue
+        print(render_goals(states.initial, limit=10**9), "\n")
+
+        def show(node, depth=0):
+            for child in node.children:
+                view = step_view(child, states)
+                pad = "  " * depth
+                print(pad + child.text)
+                if view is None:
+                    print(pad + "  │ (no state found)")
+                else:
+                    label, shown = view
+                    print(f"{pad}  │ [{label}]")
+                    for line in render_goals(shown, limit=args.limit).splitlines():
+                        print(f"{pad}  │ {line}")
+                show(child, depth + 1)
+
+        show(parse_proof_tree(decl.proof))
+        print()
 
 
 # ------------------------------------------------------------------ run
@@ -111,6 +152,7 @@ def cmd_run(args) -> None:
     explainer = LLM(args.explainer, cache_dir=Path(args.cache)) if args.explainer else None
     rebuilder = LLM(args.reconstructor, cache_dir=Path(args.cache))
     strategies = args.strategies.split(",")
+    goals = _goal_extractor(args) if "grounded" in strategies else None
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     done = set()
@@ -135,6 +177,13 @@ def cmd_run(args) -> None:
                     t0 = time.monotonic()
                     if strategy == "decoy":
                         ex = decoy_explanation(bench[pick_donor(files, i)][1], explainer)
+                    elif strategy == "grounded":
+                        states = goals.states(decl)
+                        if states.error:
+                            first = (states.error.strip().splitlines() or ["?"])[0]
+                            print(f"! {entry['name']:<40} grounded   skipped, no goal states: {first}")
+                            continue
+                        ex = explain(decl, strategy, explainer, min_children=args.min_children, states=states)
                     else:
                         ex = explain(decl, strategy, explainer, min_children=args.min_children)
                     text = mask_identifiers(decl, ex.text) if masked else ex.text
@@ -180,7 +229,7 @@ def cmd_report(args) -> None:
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         groups[(r["strategy"], r["masked"])].append(r)
-    order = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3}
+    order = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3, "grounded": 4}
     print("| strategy | masked | n | rebuilt | success | mean leak | mean chars | explainer calls |")
     print("|---|---|---|---|---|---|---|---|")
     for (strategy, masked), rs in sorted(groups.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1])):
@@ -240,18 +289,28 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("explain", help="print explanations without reconstructing")
     s.add_argument("bench")
     s.add_argument("--theorem")
-    s.add_argument("--strategy", default="recursive", choices=["flat", "recursive"])
+    s.add_argument("--strategy", default="recursive", choices=["flat", "recursive", "grounded"])
     s.add_argument("--explainer", required=True, help="e.g. anthropic:claude-opus-5-5")
     s.add_argument("--min-children", type=int, default=1)
+    s.add_argument("--timeout", type=int, default=900, help="for goal-state extraction (grounded)")
     s.add_argument("--cache", default=".cache/llm")
     s.set_defaults(fn=cmd_explain)
+
+    s = sub.add_parser("goals", help="print Lean's goal state after each proof step")
+    s.add_argument("bench")
+    s.add_argument("--theorem")
+    s.add_argument("--limit", type=int, default=1500, help="shorten states longer than this many characters")
+    s.add_argument("--timeout", type=int, default=900)
+    s.add_argument("--cache", default=".cache/llm", help="goal states are cached next to it, in <parent>/goals")
+    s.set_defaults(fn=cmd_goals)
 
     s = sub.add_parser("run", help="explain, reconstruct, and check")
     s.add_argument("bench")
     s.add_argument(
         "--strategies",
         default="none,flat,recursive",
-        help="comma-separated: none, decoy, flat, recursive (decoy = another theorem's flat explanation)",
+        help="comma-separated: none, decoy, flat, recursive, grounded "
+        "(decoy = another theorem's flat explanation; grounded = recursive + Lean goal states)",
     )
     s.add_argument("--explainer", help="model for explanations, e.g. anthropic:claude-opus-5-5")
     s.add_argument("--reconstructor", required=True, help="model that rebuilds proofs")

@@ -36,8 +36,9 @@ For each theorem and each strategy:
 | `decoy` | the statement + the `flat` explanation of a *different* benchmark theorem (control) |
 | `flat` | the statement + an explanation written in one pass from the whole proof |
 | `recursive` | the statement + an explanation built bottom-up over the proof tree |
+| `grounded` | as `recursive`, but every explainer call also sees Lean's goal state before that part of the proof and after each of its sub-steps |
 
-and, for `flat`/`recursive`, a **masked** variant in which every library lemma name from the original
+and, for `flat`/`recursive`/`grounded`, a **masked** variant in which every library lemma name from the original
 proof (and any code block) is removed from the explanation.
 
 Reported per strategy: rebuild success rate, theorems gained/lost against the `none` baseline
@@ -102,7 +103,7 @@ OpenAI-compatible endpoint), then:
 python -m lpe run benchmarks/pilot.toml \
     --explainer anthropic:claude-opus-5-5 \
     --reconstructor anthropic:claude-haiku-5-5 \
-    --strategies none,decoy,flat,recursive --mask both \
+    --strategies none,decoy,flat,recursive,grounded --mask both \
     --samples 1 --feedback 1 \
     --out results/pilot.jsonl
 
@@ -117,9 +118,15 @@ Other commands:
 ```bash
 python -m lpe explain benchmarks/pilot.toml --theorem Commute.add_pow --strategy recursive \
     --explainer anthropic:claude-opus-5-5          # just print an explanation
+python -m lpe goals benchmarks/pilot.toml --theorem Commute.add_pow
+                                                   # each proof step with Lean's goal state after it
 python -m lpe select --out benchmarks/my_set.toml --n 50 --min-lines 12 --max-lines 40 \
     --under Mathlib/NumberTheory                   # sample a new benchmark
 ```
+
+Goal states come from `lean/GoalStates.lean`, a small Lean program that elaborates the theorem's file
+(truncated after the theorem, as the checker sees it) with info trees enabled and prints the goals before
+and after every tactic, the same data the editor's infoview shows. They are cached in `.cache/goals/`.
 
 All model calls are cached in `.cache/llm/`, so re-running or re-reporting is free. Each result row in
 the JSONL file keeps the full explanation, the per-node trace of the recursive pass, and the final
@@ -129,24 +136,26 @@ candidate proof.
 
 ```
 lpe/extract.py      find a declaration in a Lean file, split statement/proof, build the proof tree
-lpe/explain.py      explanation strategies (none / decoy / flat / recursive), leakage and masking
+lpe/explain.py      explanation strategies (none / decoy / flat / recursive / grounded), leakage and masking
+lpe/goals.py        goal states per tactic (runs lean/GoalStates.lean), attached to proof-tree nodes
 lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-error feedback
 lpe/lean_check.py   splice a candidate into its original file and compile it
 lpe/llm.py          small Anthropic / OpenAI-compatible clients with an on-disk cache
 lpe/imports.py      import closures, to pick theorems that are cheap to check
-lpe/cli.py          select · sanity · explain · run · report
+lpe/cli.py          select · sanity · explain · goals · run · report
 benchmarks/         theorem lists (TOML)
 scripts/            setup_lean.sh: toolchain + Mathlib build without the release/cache servers
 docs/               ROADMAP.md (planned work), LOG.md (what changed when), literature.md
-lean/               Lean project pinned to Mathlib v4.36.0
+lean/               Lean project pinned to Mathlib v4.36.0; GoalStates.lean (info-tree goal dump)
 tests/              unit tests and a core-Lean fixture (no Mathlib needed)
 ```
 
 ## Limitations of the first version
 
-- The proof tree comes from indentation, not from Lean's elaboration. It does not see goal states,
-  so explanations are inferred from code alone. Feeding the intermediate goals (via Lean's info trees
-  or a REPL) is the obvious next step.
+- The proof tree comes from indentation, not from Lean's elaboration. Goal states (the `grounded`
+  strategy) are attached to tree nodes by the position of each node's first line, so a step whose tactic
+  does not start at the beginning of its line (e.g. after `<;>` on a continuation) gets no state of its own.
+  Whether goal states improve rebuild success has not been measured yet.
 - Automation (`simp`, `omega`, `aesop`) is treated as a single opaque step.
 - Only tactic proofs are supported; term-mode and pattern-matching proofs are skipped.
 
@@ -154,5 +163,5 @@ tests/              unit tests and a core-Lean fixture (no Mathlib needed)
 
 The prioritised plan lives in [docs/ROADMAP.md](docs/ROADMAP.md); related work, and what each paper
 suggests for this project, in [docs/literature.md](docs/literature.md). In short: run the pilot with
-real models, then ground explanations in Lean goal states, add stronger faithfulness controls
+real models (including the goal-state-grounded explanations), add stronger faithfulness controls
 (corrupted steps, step-level rebuilds), and use rebuild success minus leakage as a training signal.

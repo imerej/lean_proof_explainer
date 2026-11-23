@@ -77,6 +77,8 @@ class ProofNode:
 
     text: str  # the step's own first line (e.g. `have h : x ≤ y := by`)
     children: list["ProofNode"] = field(default_factory=list)
+    line: int = -1  # 0-based line of the step in the dedented proof (-1 for the root)
+    column: int = 0  # indentation of that line in the dedented proof
 
     @property
     def is_leaf(self) -> bool:
@@ -218,7 +220,7 @@ def parse_proof_tree(proof: str) -> ProofNode:
     root = ProofNode(text="<proof>")
     stack: list[tuple[int, ProofNode]] = [(-1, root)]
     last: ProofNode | None = None
-    for raw in proof.splitlines():
+    for lineno, raw in enumerate(proof.splitlines()):
         if not raw.strip() or raw.strip().startswith("--"):
             continue
         width = len(raw) - len(raw.lstrip())
@@ -242,7 +244,7 @@ def parse_proof_tree(proof: str) -> ProofNode:
             while stack[-1][0] >= width:
                 stack.pop()
             key = width
-        node = ProofNode(text=text)
+        node = ProofNode(text=text, line=lineno, column=width)
         stack[-1][1].children.append(node)
         stack.append((key, node))
         last = node
