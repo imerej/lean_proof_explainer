@@ -45,3 +45,53 @@ One entry per working session, newest last. Dates are Korea time.
   and feed them to the recursive explainer. The Lean setup above now makes that testable here.
 - When an API key is available: run the pilot with `none,decoy,flat,recursive` (ROADMAP item 1).
 - Follow up the unread references at the end of `docs/literature.md`.
+
+## 2026-11-24 (Tue) — goal states from Lean's info trees, `grounded` strategy
+
+**Changed**
+
+- `lean/GoalStates.lean`: a ~70-line Lean program that elaborates a file with info trees enabled and
+  prints, for every tactic in a line range, its position, syntax kind, and the pretty-printed goals
+  before and after it (one JSON object per line). It runs with `lake env lean --run`, so it needs no
+  extra build step and no dependency beyond the Mathlib already used by the checker.
+- `lpe/goals.py`: runs it on the theorem's own file truncated after the theorem (the same source the
+  checker compiles), converts positions to proof coordinates, and attaches states to the
+  indentation-based proof tree: a node gets the outermost tactic starting where its line starts.
+  Case alternatives, bullets and `calc` steps show the goal they start from; other steps show what is
+  left after them. Long states keep only case tags and targets. Results are cached in `.cache/goals/`.
+- New `grounded` strategy: the recursive pass unchanged, except that every explainer call also gets the
+  goal before that part and the goal along each of its sub-steps. Because the tree and prompts are
+  otherwise identical to `recursive`, the pair isolates the effect of the states (ROADMAP item 2).
+  Motivation: Herald (Gao et al. 2025) and Hattori et al. 2025 both informalize tactic by tactic from
+  proof states, the latter with a recursive summary over the `have` tree very close to ours; neither
+  tests whether the result lets anyone rebuild the proof.
+- `lpe goals bench.toml [--theorem X]` prints each step with its state, for inspecting what the
+  explainer sees. `lpe run` skips (with a message) `grounded` rows whose states could not be extracted.
+- `docs/literature.md`: three new entries (Hattori et al. 2025 step-wise informalization with recursive
+  summarization; Wang et al. 2025 chain of states; Pantograph). `docs/ROADMAP.md`: item 2 is now
+  "measure grounding"; new items 11 (waypoint agreement between explanation claims and the real goal
+  chain) and 12 (template descriptions of stereotyped leaves).
+
+**Verified**
+
+- `python3 -m pytest -q`: 24 passed (new: record parsing and coordinate conversion, node lookup,
+  state shortening, prompt contents of `grounded` vs. `recursive`, an offline `run`/`report`/`goals`
+  end to end, and a test that reads real goal states from the core-Lean fixture).
+- `python3 -m lpe sanity benchmarks/pilot.toml`: all 12 ok, after rebuilding the pilot closure from a
+  fresh checkout with `scripts/setup_lean.sh` (2,669 jobs, under an hour on 2 cores).
+- Goal extraction on all 12 pilot theorems: no failures, about 5 s per theorem; 174 of 183 proof-tree
+  nodes get a state. The 9 without one are term-mode `calc` steps and continuation lines of term
+  arguments, which contain no tactic.
+- Smoke run with the real checker and the real goal extractor on the first two pilot theorems, with
+  mock models (the rebuilder writes the original proof only if the explanation came from a prompt that
+  contained goal states): `grounded` 2/2 masked and unmasked, `recursive` 0/2, `none` 0/2. This tests
+  the plumbing only; it is not an experimental result.
+- No model API key was available, so there are still no real explain/rebuild numbers.
+
+**Next**
+
+- Wednesday (explanation strategies): with goal states in hand, contrastive "why" at a node is now
+  feasible: try one or two alternative tactics on the node's goal and give the explainer Lean's verdict.
+- Goal states may carry Lean notation into explanations; extend `leakage` with notation markers
+  (`⊢`, `↑`, `h₁`-style names) before the first real `grounded` run (ROADMAP item 2).
+- When an API key is available: run the pilot with `none,decoy,flat,recursive,grounded`.

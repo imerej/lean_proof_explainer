@@ -95,9 +95,55 @@ localized feedback. Its false alarms are a warning for any step-level rebuild me
 step rebuild can mean a weak rebuilder rather than a weak explanation, so step metrics need the same
 `none`/`decoy` controls as whole-proof rebuilds.
 
+## Proof states and step-wise informalization
+
+**Hattori, Matsuzaki, Fujiwara. *Natural Language Translation of Formal Proofs through Informalization of Proof Steps and Recursive Summarization along Proof Structure.* arXiv:2509.09726, 2025.**
+<https://arxiv.org/abs/2509.09726> (first author's surname is spelled "Hattrori" on the arXiv page)
+The closest prior work to this repository. For Lean 4/Mathlib proofs, an extended LeanDojo extractor
+supplies each tactic with its goal state before and after; every step is informalized from a
+hand-written per-tactic template filled with those states plus LLM-written explanations of the cited
+Mathlib lemmas; `have` blocks define a tree, and the tree is summarized recursively from the innermost
+sub-proofs outward. Evaluated by hand (one annotator) on 38 proofs from a calculus textbook: step
+correctness rises from about 53% with neither templates nor the premise library to about 89% with
+both, while recursive summarization helps the final text only slightly. There is no rebuild/round-trip
+test; formal notation still leaks into the output.
+*Relevance to this repo:* independent support for both halves of the `grounded` strategy (goal states
+per step, recursive consolidation over the `have` tree), and for ROADMAP item 6 (premise context): in
+their ablation the premise library mattered more than the templates. What this repository adds is the
+rebuild test with `none`/`decoy` controls, which would also tell whether their 89% "correct steps"
+translate into explanations someone can act on. Their per-tactic templates are a cheap thing to try at
+the leaves of our tree (`rw`, `simp`, `obtain` have stereotyped meanings).
+
+**Wang, Yang, Li, Zhang, Zhou, Dong, Wen. *Translating Informal Proofs into Formal Proofs Using a Chain of States.* arXiv:2512.10317, 2025.**
+<https://arxiv.org/abs/2512.10317>
+The reverse direction: to formalize an informal proof, a small model first writes a *chain of formal
+proof states* that follows the informal argument, and tactics are then searched between consecutive
+states (off-the-shelf automation first, a reasoning model second, with regeneration of failing tactics
+or states). Training data are proof states read from elaboration trees over Mathlib and Lean Workbook.
+Reported to reach about 69% on miniF2F-test at a small sampling budget; the ablation attributes most of
+the gain to the state-repair loop rather than to the tactic generator.
+*Relevance to this repo:* suggests that the most useful content of an explanation, for a rebuilder, is
+the sequence of intermediate goals; the tactics between them are often found by automation. Two
+concrete uses: (a) measure what fraction of each explanation's intermediate claims match the real goal
+chain (a cheap faithfulness proxy, complementary to ROADMAP item 7); (b) a rebuilder variant that first
+formalizes the explanation's claims as a chain of `have`s and then fills the gaps, which separates
+"the explanation states the right waypoints" from "the rebuilder can find the tactics".
+
+**Aniva, Sun, Miranda, Barrett, Koyejo. *Pantograph: A Machine-to-Machine Interaction Interface for Advanced Theorem Proving, High Level Reasoning, and Data Extraction in Lean 4.* arXiv:2410.16429, 2024.**
+<https://arxiv.org/abs/2410.16429>
+A Lean 4 library and REPL (with Python bindings) for driving proofs from another program: inspect goals,
+run tactics incrementally (including partial `conv` and `calc`), and turn each `sorry` in a draft into
+an open goal. Its frontend command processes a whole file and returns (goal before, tactic, goal after)
+triples, which is the same data LeanDojo extracts, without Docker and with explicit tracking of goals
+that share metavariables. Demonstrated with a draft-sketch-prove loop on miniF2F.
+*Relevance to this repo:* the reference design for what `lean/GoalStates.lean` now does in about 60
+lines (walk the info trees, print states per tactic). If we need interactive steps later (trying
+alternative tactics at a node for contrastive "why" explanations, or step-level rebuilds without
+recompiling the file), Pantograph's goal-state API is the tool to adopt rather than growing our script.
+
 ## Not yet read / to follow up
 
 - arXiv:2603.24372 (formal–informal translation; the page could not be fetched on 2026-11-23).
 - *Do Chess Explanations Reflect Model Decisions? Behavioral and Token-Level Tests of LLM Reasoning Faithfulness*, NeurIPS 2026 (<https://neurips.cc/virtual/2026/169063>): counterfactual tests of explanation faithfulness in chess.
-- Pantograph and the leanprover-community `repl` for goal-state extraction (needed for proof-state grounding).
+- The leanprover-community `repl` (tactic mode with proof-state ids), as an alternative to Pantograph for step-level rebuilds.
 - Quan, Valentino, Dennis, Freitas. *Faithful and Robust LLM-Driven Theorem Proving for NLI Explanations*, arXiv:2505.24264 (prover-feedback refinement of explanations; relevant to iterative refinement).

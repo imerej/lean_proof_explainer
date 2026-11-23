@@ -5,15 +5,15 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
 
 ## Next
 
-1. **Run the pilot with real models.** `none,decoy,flat,recursive` × masked/unmasked on
+1. **Run the pilot with real models.** `none,decoy,flat,recursive,grounded` × masked/unmasked on
    `benchmarks/pilot.toml`. Nothing has been measured yet; every claim about which strategy is better
    waits on this. *Measure:* the report's gain over `none` **and** over `decoy`.
 
-2. **Goal states for each step (proof-state grounding).** Extract the goal before/after each tactic
-   (InfoTrees via a small Lean metaprogram, the `repl`, or Pantograph) and give them to the explainer
-   at every node of the recursive pass. Herald translates proofs tactic by tactic from proof states
-   (Gao et al. 2025); the chess recipe explains positions, not moves in isolation (Bhaskar et al. 2026).
-   *Measure:* rebuild gain over `recursive` without states, at equal leakage.
+2. **Measure grounding.** The `grounded` strategy (recursive pass + Lean goal states, see Done) exists
+   but has not been run with real models. *Measure:* rebuild gain of `grounded` over `recursive` at equal
+   leakage, plus the leakage of Lean notation from the goal states into the prose (a new leakage form:
+   check for `⊢`, `↑`, hypothesis names like `h₁`). Hattori et al. 2025 report better step translations
+   with states; whether that survives a rebuild test is open.
 
 3. **Corrupted-step control.** Take the real explanation, change one intermediate claim (swap an
    inequality, drop a hypothesis, delete a step), and rebuild. If success does not drop, the rebuilder
@@ -49,9 +49,22 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
     reward = success − λ·leakage; best-of-n explanation selection; distillation loop as in the chess
     recipe.
 
+11. **Waypoint agreement.** Formalize the intermediate claims of an explanation and compare them with the
+    real goal chain now available from `lpe goals` (how many explanation claims match a goal the proof
+    actually passes through, up to `simp`-normalization or a short proof of equivalence). A rebuilder
+    variant that first writes the claims as a chain of `have … := by sorry` and then fills the gaps
+    separates "the explanation names the right waypoints" from "the rebuilder can find the tactics"
+    (Wang et al. 2025, chain of states). *Measure:* waypoint recall vs. rebuild success, per theorem.
+
+12. **Leaf templates.** Describe leaves with stereotyped meaning (`rw`, `simp only`, `obtain`, `intro`,
+    `constructor`) from their before/after states with a fixed template instead of a model call, as in
+    Hattori et al. 2025. *Measure:* explainer calls saved at equal rebuild success.
+
 ## Done
 
 - 2026-11-23 — `scripts/setup_lean.sh`: toolchain from GitHub releases + build of the benchmark's
   import closure, for machines without access to the Lean release and Mathlib cache servers.
 - 2026-11-23 — `decoy` control strategy (another theorem's flat explanation) and a paired
   "gain over decoy" section in `lpe report`.
+- 2026-11-24 — Goal states per tactic from Lean's info trees (`lean/GoalStates.lean`, `lpe/goals.py`,
+  `lpe goals`) and the `grounded` strategy that gives them to every node of the recursive pass.
