@@ -5,19 +5,21 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
 
 ## Next
 
-1. **Run the pilot with real models.** `none,decoy,flat,recursive,grounded` × masked/unmasked on
+1. **Run the pilot with real models.** `none,decoy,flat,recursive,grounded,contrastive` × masked/unmasked on
    `benchmarks/pilot.toml`. Nothing has been measured yet; every claim about which strategy is better
    waits on this. *Measure:* the report's gain over `none` **and** over `decoy`.
 
 2. **Measure grounding.** The `grounded` strategy (recursive pass + Lean goal states, see Done) exists
    but has not been run with real models. *Measure:* rebuild gain of `grounded` over `recursive` at equal
-   leakage, plus the leakage of Lean notation from the goal states into the prose (a new leakage form:
-   check for `⊢`, `↑`, hypothesis names like `h₁`). Hattori et al. 2025 report better step translations
-   with states; whether that survives a rebuild test is open.
+   leakage, plus the leakage of Lean notation from the goal states into the prose (now recorded per row
+   as `lean_notation` and reported as the "Lean notation" column). Hattori et al. 2025 report better step
+   translations with states; whether that survives a rebuild test is open.
 
 3. **Corrupted-step control.** Take the real explanation, change one intermediate claim (swap an
    inequality, drop a hypothesis, delete a step), and rebuild. If success does not drop, the rebuilder
-   is not following the explanation. Motivated by the local perturbations of Gui et al. 2026.
+   is not following the explanation. Motivated by the local perturbations of Gui et al. 2026. Include
+   near-miss corruptions (off-by-one bounds, slightly weaker hypotheses), the analogue of the "nearby
+   negatives" of Press & Golubev 2026.
    *Measure:* success(real) − success(corrupted), per theorem.
 
 4. **Step-level reconstruction with diagnosis.** Rebuild one sub-proof (`have` block, case) at a time
@@ -60,6 +62,21 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
     `constructor`) from their before/after states with a fixed template instead of a model call, as in
     Hattori et al. 2025. *Measure:* explainer calls saved at equal rebuild success.
 
+13. **Measure contrast.** Run `contrastive` against `grounded` (same tree, same states; the only
+    difference is Lean's verdict on routine alternatives). *Measure:* rebuild gain at equal leakage;
+    and, per Rastogi 2026, an ablation that deletes only the "why not" sentences from contrastive
+    explanations (length-matched deletion as control) to see whether the rebuilder uses them.
+
+14. **Verdict faithfulness.** Check each explained part's "routine / non-routine" wording against the
+    verdict table from `lpe contrast` (trace rows carry a `contrast` summary). A cheap instance of
+    tool-checked claims (Hebbar et al. 2026). *Measure:* fraction of parts whose explanation contradicts
+    Lean's verdict.
+
+15. **Richer contrasts.** Beyond fixed closers: the original tactic with one premise removed, the
+    proof's next step applied one step early, or the case split skipped. Each tells the explainer why a
+    specific ingredient is needed, closer to the best-move-vs-alternative contrasts of chess.
+    *Measure:* as item 13, contrastive-rich vs. contrastive.
+
 ## Done
 
 - 2026-11-23 — `scripts/setup_lean.sh`: toolchain from GitHub releases + build of the benchmark's
@@ -68,3 +85,6 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
   "gain over decoy" section in `lpe report`.
 - 2026-11-24 — Goal states per tactic from Lean's info trees (`lean/GoalStates.lean`, `lpe/goals.py`,
   `lpe goals`) and the `grounded` strategy that gives them to every node of the recursive pass.
+- 2026-11-25 — `contrastive` strategy: Lean's verdict on routine alternatives (`simp`, `omega`,
+  `linarith`, …) at the goal each explained part starts from (`lean/TryTactics.lean`, `lpe/contrast.py`,
+  `lpe contrast`); `lean_notation` leakage per result row and in `lpe report`.

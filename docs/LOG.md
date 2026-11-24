@@ -95,3 +95,66 @@ One entry per working session, newest last. Dates are Korea time.
 - Goal states may carry Lean notation into explanations; extend `leakage` with notation markers
   (`⊢`, `↑`, `h₁`-style names) before the first real `grounded` run (ROADMAP item 2).
 - When an API key is available: run the pilot with `none,decoy,flat,recursive,grounded`.
+
+## 2026-11-25 (Wed) — contrastive "why" from Lean's verdicts, notation leakage
+
+**Changed**
+
+- `lean/TryTactics.lean`: elaborates the theorem's file (truncated after the theorem, as the checker
+  sees it) with info trees enabled and, at requested positions, runs a list of alternative tactics on
+  the goal *before* the tactic there, each in a fresh copy of the proof state and under a heartbeat
+  limit. Each try is reported as `closed`, `progress` (with the remaining goals), `unchanged`,
+  `failed` (with Lean's error), or `unavailable` (the tactic does not exist in this file's imports;
+  the rebuilder could not use it either, so it is not shown to the explainer). Successes that only
+  come from error recovery (an error message or a `sorry` in the term) count as failures.
+- `lpe/contrast.py`: chooses, for each part the recursive pass explains, the goal the part starts
+  from (the claim of a `have … := by`, the goal of a case or `calc` step, the theorem for the whole
+  proof), matching the goal text that `goals.py` attaches, runs the Lean program once per theorem,
+  and renders the verdicts for prompts. Cached in `.cache/contrast/`, keyed by the source, the probe
+  list and the Lean program itself.
+- New `contrastive` strategy: the `grounded` pass plus, in every explainer call, Lean's verdict on the
+  routine alternatives (default `simp, omega, linarith, nlinarith, norm_num, ring, positivity, aesop`)
+  at the start of that part, and an instruction to use it to say why the part is needed, or that it is
+  routine. Prompts are otherwise identical to `grounded`, so the pair isolates the verdicts (tested).
+  Trace rows record a `contrast` summary per node ("routine: closed directly by …" / "non-routine").
+  Motivation: chess explanations are contrastive (best move vs. an alternative), and the strongest
+  recent work decides the contrast with the engine rather than the explainer (Press & Golubev 2026;
+  claims checked with engine tools in Hebbar et al. 2026).
+- `lpe contrast bench.toml [--theorem X]` prints the verdict table per part; `run`/`explain` accept
+  `--alternatives` and `--heartbeats`.
+- Leakage: every result row now has `lean_notation`, the kinds of Lean-only notation found in the
+  explanation (turnstile, coercion arrows, subscripted hypothesis names, `.succ`-style projections),
+  and `lpe report` has a "Lean notation" column (share of rows with any). Goal states and verdicts put
+  this notation in front of the explainer; lemma-name matching did not catch it (ROADMAP item 2).
+- `docs/literature.md`: three new entries (BinProp contrastive chess/Go explanations; ACT-Eval
+  tool-verified chess commentary; a causal test of "why not the rival" reasons). `docs/ROADMAP.md`:
+  new items 13 (measure contrast, with a "why not" deletion ablation), 14 (verdict faithfulness),
+  15 (richer contrasts: drop a premise, skip a case split); near-miss corruptions added to item 3.
+
+**Verified**
+
+- `python3 -m pytest -q`: 35 passed (new: choice of the starting goal per part, output parsing and
+  grouping, rendering, prompt contents of `contrastive` vs. `grounded`, unavailable tactics, offline
+  `run`/`report`/`contrast` end to end, and a test that runs alternatives in real Lean on the
+  core-Lean fixture).
+- `python3 -m lpe sanity benchmarks/pilot.toml`: all 12 ok, after rebuilding the pilot closure from a
+  fresh checkout with `scripts/setup_lean.sh` (2,669 jobs).
+- `lpe contrast` on all 12 pilot theorems: 62 explained parts, every one matched to a probe, about 70 s
+  in total from an empty contrast cache. 13 parts are closed directly by a routine tactic (mostly
+  `aesop`), 49 are not. Many pilot files import too little of Mathlib for `linarith`, `ring` or
+  `positivity` to exist there (36 of 62 parts lack at least `norm_num`), so the effective set of
+  alternatives varies by file; this is a property of the benchmark files, not a failure.
+- Smoke run with the real checker, real goal states and real verdicts on the first two pilot theorems,
+  with mock models (the rebuilder writes the original proof only when the explanation came from a
+  prompt that contained verdicts): `contrastive` 2/2 masked and unmasked, `grounded` 0/2, `none` 0/2.
+  This tests the plumbing only; it is not an experimental result.
+- No model API key was available, so there are still no real explain/rebuild numbers.
+
+**Next**
+
+- Thursday (evaluation rigour): paired statistics in `lpe report` (ROADMAP item 8) are now the
+  bottleneck for comparing six strategies on 12 theorems; then the verdict-faithfulness check
+  (item 14), which needs no API key for its plumbing.
+- Consider whether the alternatives should run with a fixed extra import (e.g. `Mathlib.Tactic`) so
+  every file gets the same closers; that changes what "routine" means and would need its own build.
+- When an API key is available: run the pilot with `none,decoy,flat,recursive,grounded,contrastive`.

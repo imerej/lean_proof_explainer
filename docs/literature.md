@@ -141,6 +141,50 @@ lines (walk the info trees, print states per tactic). If we need interactive ste
 alternative tactics at a node for contrastive "why" explanations, or step-level rebuilds without
 recompiling the file), Pantograph's goal-state API is the tool to adopt rather than growing our script.
 
+## Contrastive explanation and checking claims against a tool
+
+**Press, Golubev. *Explaining Chess and Go in Natural Language.* arXiv:2610.23166, 2026.**
+<https://arxiv.org/abs/2610.23166>
+Treats a chess explanation as *contrastive*: given the engine's best move and a weaker alternative, it
+should name a property (a "motif", written as a boolean function on positions) that holds after the best
+line and not after the alternative. Positives and negatives are sampled by letting Stockfish play out
+both lines, plus "nearby negatives" that share a prefix with a positive and diverge late, which catch
+motifs that only look right. A motif's score is its worst accuracy over the three groups. Their
+training-free method (BinProp: an LLM proposes motifs over a large position corpus, then motifs are
+ranked per move) raises the average score across eight models from about 0.08 to about 0.24, and
+transfers to Go. (Read from the abstract page and the first part of the paper only.)
+*Relevance to this repo:* the contrast is decided by the engine, not by the explainer, which is the
+design of the new `contrastive` strategy: Lean decides which routine alternatives fail at a goal, and
+the explainer only translates the verdict. Their "nearby negatives" suggest that the corrupted-step
+control (ROADMAP item 3) should include near-miss corruptions (a bound off by one, a weaker hypothesis),
+not only gross ones, and their worst-group score suggests reporting the worst of the control gaps.
+
+**Hebbar, Sheng, Oh, Viswanath. *Hallucinations on the Board: Tool-Augmented Evaluation of LLM Chess Commentary.* arXiv:2608.04240, 2026.**
+<https://arxiv.org/abs/2608.04240>
+ACT-Eval splits generated chess commentary into atomic claims, splits those into verifiable
+sub-claims, and has a judge check each one with about fifteen Stockfish-backed tools (board state,
+attacks, move simulation, evaluation); a claim counts only if all its parts check out. With tools, the
+judge's sub-claim error rate drops from about 22% to about 9%, and bad-move detection becomes reliable,
+while a fluency-style judge still rated many commentaries highly that the tool check found mostly
+wrong. Recall of expert-annotated claims stays at most about 61%. Long variations remain hard to verify.
+*Relevance to this repo:* a concrete template for the claim-level score of ROADMAP item 7: decompose
+an explanation into atomic claims, and verify each with the formal tool. It also gives a cheap first
+check for contrastive explanations: every "this cannot be done by routine arithmetic" or "this is
+routine" sentence can be compared with the verdict table that `lpe contrast` produced.
+
+**Rastogi. *Does a model's stated reason for rejecting a candidate do any work?* arXiv:2609.30151, 2026.**
+<https://arxiv.org/abs/2609.30151>
+A causal test of "why not the other option" reasons in multi-hop question answering: the model picks an
+answer and names a rejected rival plus the attribute the rival lacks; the experimenter then inserts a
+real sentence giving the rival that attribute and asks again, with length-matched irrelevant insertions
+and insertions at an unnamed option as controls. The relevant edit at the named rival moves the choice
+more than the irrelevant one in the main experiment (odds ratio about 3.6), but the effect does not
+replicate on other checkpoints, and the author presents the result as a bound rather than a finding.
+*Relevance to this repo:* the same intervention logic tests whether the "why not" sentences of a
+`contrastive` explanation are used by the rebuilder: remove (or invert) only those sentences and compare
+rebuild success, with a length-matched deletion as control. Its fragile effect sizes are another
+argument for paired statistics before claiming any strategy difference (ROADMAP item 8).
+
 ## Not yet read / to follow up
 
 - arXiv:2603.24372 (formal–informal translation; the page could not be fetched on 2026-11-23).
