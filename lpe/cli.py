@@ -11,6 +11,7 @@ import tomllib
 from collections import defaultdict
 from pathlib import Path
 
+from .contrast import DEFAULT_ALTERNATIVES, ContrastRunner, probe_targets, render_verdicts, verdict_summary
 from .explain import decoy_explanation, explain, leakage, mask_identifiers, pick_donor
 from .extract import find_declaration, parse_proof_tree
 from .goals import GoalExtractor, render_goals, step_view
@@ -94,12 +95,14 @@ def cmd_sanity(args) -> None:
 
 def cmd_explain(args) -> None:
     llm = LLM(args.explainer, cache_dir=Path(args.cache))
-    goals = _goal_extractor(args) if args.strategy == "grounded" else None
+    goals = _goal_extractor(args) if args.strategy in ("grounded", "contrastive") else None
+    runner = _contrast_runner(args) if args.strategy == "contrastive" else None
     for entry, decl in load_bench(Path(args.bench), args.project):
         if args.theorem and entry["name"] != args.theorem:
             continue
         states = goals.states(decl) if goals else None
-        ex = explain(decl, args.strategy, llm, min_children=args.min_children, states=states)
+        contrasts = runner.contrasts(decl, states, args.min_children) if runner else None
+        ex = explain(decl, args.strategy, llm, min_children=args.min_children, states=states, contrasts=contrasts)
         leak = leakage(decl, ex.text)
         print(f"## {entry['name']}  [{args.strategy}, {ex.calls} calls, leakage {leak.rate:.0%}]\n")
         print(ex.text, "\n")
@@ -110,6 +113,47 @@ def cmd_explain(args) -> None:
 
 def _goal_extractor(args) -> GoalExtractor:
     return GoalExtractor(args.project, timeout=args.timeout, cache_dir=Path(args.cache).parent / "goals")
+
+
+def _contrast_runner(args) -> ContrastRunner:
+    alternatives = [t.strip() for t in args.alternatives.split(",") if t.strip()]
+    return ContrastRunner(
+        args.project,
+        alternatives=alternatives,
+        heartbeats=args.heartbeats,
+        timeout=args.timeout,
+        cache_dir=Path(args.cache).parent / "contrast",
+    )
+
+
+def cmd_contrast(args) -> None:
+    """Print, for each explained part of each proof, what routine alternatives do on its goal."""
+    extractor = _goal_extractor(args)
+    runner = _contrast_runner(args)
+    for entry, decl in load_bench(Path(args.bench), args.project):
+        if args.theorem and entry["name"] != args.theorem:
+            continue
+        states = extractor.states(decl)
+        contrasts = runner.contrasts(decl, states, args.min_children)
+        print(f"## {entry['name']}\n")
+        if contrasts.error:
+            print(f"failed:\n{contrasts.error}\n")
+            continue
+        targets = probe_targets(decl, states, args.min_children)
+        lines = decl.proof.splitlines()
+        for (line, _col), target in sorted(targets.items()):
+            probe = contrasts.at(*target)
+            where = "whole proof" if line < 0 else lines[line].strip()
+            if probe is None:
+                print(f"{where}\n  (no probe)\n")
+                continue
+            print(f"{where}\n  [{verdict_summary(probe)}]")
+            for row in render_verdicts(probe).splitlines():
+                print(f"  {row}")
+            missing = [v.tactic for v in probe.verdicts if v.status == "unavailable"]
+            if missing:
+                print(f"  (not available in this file: {', '.join(missing)})")
+            print()
 
 
 def cmd_goals(args) -> None:
@@ -152,7 +196,8 @@ def cmd_run(args) -> None:
     explainer = LLM(args.explainer, cache_dir=Path(args.cache)) if args.explainer else None
     rebuilder = LLM(args.reconstructor, cache_dir=Path(args.cache))
     strategies = args.strategies.split(",")
-    goals = _goal_extractor(args) if "grounded" in strategies else None
+    goals = _goal_extractor(args) if {"grounded", "contrastive"} & set(strategies) else None
+    runner = _contrast_runner(args) if "contrastive" in strategies else None
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     done = set()
@@ -177,13 +222,22 @@ def cmd_run(args) -> None:
                     t0 = time.monotonic()
                     if strategy == "decoy":
                         ex = decoy_explanation(bench[pick_donor(files, i)][1], explainer)
-                    elif strategy == "grounded":
+                    elif strategy in ("grounded", "contrastive"):
                         states = goals.states(decl)
                         if states.error:
                             first = (states.error.strip().splitlines() or ["?"])[0]
-                            print(f"! {entry['name']:<40} grounded   skipped, no goal states: {first}")
+                            print(f"! {entry['name']:<40} {strategy:<10} skipped, no goal states: {first}")
                             continue
-                        ex = explain(decl, strategy, explainer, min_children=args.min_children, states=states)
+                        contrasts = None
+                        if strategy == "contrastive":
+                            contrasts = runner.contrasts(decl, states, args.min_children)
+                            if contrasts.error:
+                                first = (contrasts.error.strip().splitlines() or ["?"])[0]
+                                print(f"! {entry['name']:<40} {strategy:<10} skipped, no verdicts: {first}")
+                                continue
+                        ex = explain(
+                            decl, strategy, explainer, min_children=args.min_children, states=states, contrasts=contrasts
+                        )
                     else:
                         ex = explain(decl, strategy, explainer, min_children=args.min_children)
                     text = mask_identifiers(decl, ex.text) if masked else ex.text
@@ -208,6 +262,7 @@ def cmd_run(args) -> None:
                         "leak_rate": round(leak.rate, 3),
                         "leaked_identifiers": leak.identifiers_leaked,
                         "proof_identifiers": leak.identifiers_total,
+                        "lean_notation": leak.notation,
                         "explanation": text,
                         "trace": ex.trace,
                         "final_proof": rec.attempts[-1].proof if rec.attempts else "",
@@ -229,16 +284,17 @@ def cmd_report(args) -> None:
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         groups[(r["strategy"], r["masked"])].append(r)
-    order = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3, "grounded": 4}
-    print("| strategy | masked | n | rebuilt | success | mean leak | mean chars | explainer calls |")
-    print("|---|---|---|---|---|---|---|---|")
+    order = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3, "grounded": 4, "contrastive": 5}
+    print("| strategy | masked | n | rebuilt | success | mean leak | mean chars | explainer calls | Lean notation |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for (strategy, masked), rs in sorted(groups.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1])):
         n = len(rs)
         ok = sum(r["success"] for r in rs)
         print(
             f"| {strategy} | {'yes' if masked else 'no'} | {n} | {ok} | {ok / n:.0%} | "
             f"{sum(r['leak_rate'] for r in rs) / n:.0%} | {sum(r['explanation_chars'] for r in rs) / n:.0f} | "
-            f"{sum(r['explainer_calls'] for r in rs) / n:.1f} |"
+            f"{sum(r['explainer_calls'] for r in rs) / n:.1f} | "
+            f"{sum(bool(r.get('lean_notation')) for r in rs) / n:.0%} |"
         )
     # Paired view: which theorems does each strategy rebuild that the baseline does not?
     by_thm: dict[str, dict] = defaultdict(dict)
@@ -261,6 +317,15 @@ def cmd_report(args) -> None:
 
 
 # ------------------------------------------------------------------ main
+
+
+def _contrast_args(s: argparse.ArgumentParser) -> None:
+    s.add_argument(
+        "--alternatives",
+        default=",".join(DEFAULT_ALTERNATIVES),
+        help="comma-separated tactics tried on each part's goal (contrastive strategy)",
+    )
+    s.add_argument("--heartbeats", type=int, default=50000, help="per alternative, in thousands (contrastive)")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -289,12 +354,22 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("explain", help="print explanations without reconstructing")
     s.add_argument("bench")
     s.add_argument("--theorem")
-    s.add_argument("--strategy", default="recursive", choices=["flat", "recursive", "grounded"])
+    s.add_argument("--strategy", default="recursive", choices=["flat", "recursive", "grounded", "contrastive"])
     s.add_argument("--explainer", required=True, help="e.g. anthropic:claude-opus-5-5")
     s.add_argument("--min-children", type=int, default=1)
-    s.add_argument("--timeout", type=int, default=900, help="for goal-state extraction (grounded)")
+    s.add_argument("--timeout", type=int, default=900, help="for goal-state extraction (grounded, contrastive)")
     s.add_argument("--cache", default=".cache/llm")
+    _contrast_args(s)
     s.set_defaults(fn=cmd_explain)
+
+    s = sub.add_parser("contrast", help="print what routine tactics do on the goal of each explained part")
+    s.add_argument("bench")
+    s.add_argument("--theorem")
+    s.add_argument("--min-children", type=int, default=1)
+    s.add_argument("--timeout", type=int, default=1800)
+    s.add_argument("--cache", default=".cache/llm", help="results are cached next to it, in <parent>/contrast")
+    _contrast_args(s)
+    s.set_defaults(fn=cmd_contrast)
 
     s = sub.add_parser("goals", help="print Lean's goal state after each proof step")
     s.add_argument("bench")
@@ -309,8 +384,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument(
         "--strategies",
         default="none,flat,recursive",
-        help="comma-separated: none, decoy, flat, recursive, grounded "
-        "(decoy = another theorem's flat explanation; grounded = recursive + Lean goal states)",
+        help="comma-separated: none, decoy, flat, recursive, grounded, contrastive "
+        "(decoy = another theorem's flat explanation; grounded = recursive + Lean goal states; "
+        "contrastive = grounded + Lean's verdict on routine alternative tactics)",
     )
     s.add_argument("--explainer", help="model for explanations, e.g. anthropic:claude-opus-5-5")
     s.add_argument("--reconstructor", required=True, help="model that rebuilds proofs")
@@ -321,6 +397,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--timeout", type=int, default=900)
     s.add_argument("--cache", default=".cache/llm")
     s.add_argument("--out", default="results/run.jsonl")
+    _contrast_args(s)
     s.add_argument("--overwrite", action="store_true")
     s.set_defaults(fn=cmd_run)
 

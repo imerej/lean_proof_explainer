@@ -12,6 +12,10 @@
              after each of its sub-steps added to every prompt (see `goals.py`). Needs the
              states from `GoalExtractor`; the tree is the same as for `recursive`, so the two
              differ only in what the explainer sees.
+  contrastive  the grounded pass, plus Lean's verdict on routine alternatives (`simp`, `omega`,
+             `linarith`, ...) tried on the goal each explained part starts from (see
+             `contrast.py`), so the explainer can say why the step is needed, or that it is
+             routine. Same tree and goal states as `grounded`, so the pair isolates the verdicts.
   decoy      control: the flat explanation of a *different* theorem from the same
              benchmark. Rebuild success with a decoy measures how much an explanation
              helps through its form alone (a longer prompt, a confident tone, generic
@@ -25,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 
 from .extract import Declaration, ProofNode, lemma_identifiers, parse_proof_tree
+from .contrast import Contrasts, probe_targets, render_verdicts, verdict_summary
 from .goals import ProofStates, annotate
 from .llm import LLM
 
@@ -63,6 +68,13 @@ When Lean's goal states are given, use them to state intermediate claims precise
 
 {FINAL_FORMAT}"""
 
+CONTRAST_RULES = """\
+When Lean's verdicts on routine alternatives are given for this part, use them to explain why the part \
+is needed. If no routine method closes the goal, say in mathematical terms what makes it non-routine \
+(for instance: it is not linear arithmetic, it needs an induction, it needs a specific identity or an \
+auxiliary bound); if one does close it, say briefly that the claim is routine and do not invent a deeper \
+reason. Report only what the verdicts show; do not name the tactics."""
+
 
 @dataclass
 class Explanation:
@@ -78,6 +90,7 @@ def explain(
     llm: LLM | None,
     min_children: int = 1,
     states: ProofStates | None = None,
+    contrasts: Contrasts | None = None,
 ) -> Explanation:
     if strategy == "none":
         return Explanation("none", "")
@@ -93,6 +106,14 @@ def explain(
             reason = states.error if states is not None else "no goal states given"
             raise ValueError(f"strategy 'grounded' needs goal states for {decl.name}: {reason}")
         return _recursive(decl, llm, min_children, states=states, name="grounded")
+    if strategy == "contrastive":
+        if states is None or not states.tactics:
+            reason = states.error if states is not None else "no goal states given"
+            raise ValueError(f"strategy 'contrastive' needs goal states for {decl.name}: {reason}")
+        if contrasts is None or contrasts.error:
+            reason = contrasts.error if contrasts is not None else "no verdicts given"
+            raise ValueError(f"strategy 'contrastive' needs alternative-tactic verdicts for {decl.name}: {reason}")
+        return _recursive(decl, llm, min_children, states=states, contrasts=contrasts, name="contrastive")
     if strategy == "decoy":
         raise ValueError("the decoy strategy needs a donor theorem; use decoy_explanation()")
     raise ValueError(f"unknown strategy {strategy!r}")
@@ -128,9 +149,36 @@ def pick_donor(files: list[str], index: int) -> int:
 
 
 def _recursive(
-    decl: Declaration, llm: LLM, min_children: int, states: ProofStates | None = None, name: str = "recursive"
+    decl: Declaration,
+    llm: LLM,
+    min_children: int,
+    states: ProofStates | None = None,
+    name: str = "recursive",
+    contrasts: Contrasts | None = None,
 ) -> Explanation:
     root = parse_proof_tree(decl.proof)
+    targets = probe_targets(decl, states, min_children) if contrasts is not None and states else {}
+    node_system = f"{NODE_SYSTEM}\n\n{CONTRAST_RULES}" if contrasts is not None else NODE_SYSTEM
+    root_system = f"{ROOT_SYSTEM}\n\n{CONTRAST_RULES}" if contrasts is not None else ROOT_SYSTEM
+
+    def probe_for(node: ProofNode):
+        target = targets.get((node.line, node.column))
+        probe = contrasts.at(*target) if contrasts is not None and target else None
+        tried = probe is not None and any(v.status != "unavailable" for v in probe.verdicts)
+        return probe if tried else None
+
+    def contrast_text(node: ProofNode) -> str:
+        probe = probe_for(node)
+        if probe is None:
+            return ""
+        return f"\n\nLean's verdict on routine alternatives at the start of this part:\n\n{render_verdicts(probe)}"
+
+    def record(entry: dict, node: ProofNode) -> dict:
+        probe = probe_for(node)
+        if probe is not None:
+            entry["contrast"] = verdict_summary(probe)
+        return entry
+
     out = Explanation(name, "")
     counter = [0]
 
@@ -153,15 +201,16 @@ def _recursive(
 
         notes_text = "\n\n".join(notes) if notes else "(none)"
         goal_text = f"\n\nLean's goal states for this part:\n\n{annotate(node, states)}" if states else ""
+        goal_text += contrast_text(node)
         if is_root:
             user = (
                 f"Theorem:\n```lean\n{decl.statement_in_context}\n```\n\n"
                 f"Proof, with sub-steps collapsed:\n```lean\n{_dedent(code_here)}\n```\n\n"
                 f"Explanations of the collapsed sub-steps:\n\n{notes_text}{goal_text}"
             )
-            text = llm.chat(ROOT_SYSTEM, user)
+            text = llm.chat(root_system, user)
             out.calls += 1
-            out.trace.append({"node": "root", "code": code_here, "explanation": text})
+            out.trace.append(record({"node": "root", "code": code_here, "explanation": text}, node))
             return code_here, text
 
         counter[0] += 1
@@ -171,9 +220,9 @@ def _recursive(
             f"This part of the proof:\n```lean\n{code_here}\n```\n\n"
             f"Explanations of its collapsed sub-steps:\n\n{notes_text}{goal_text}"
         )
-        text = llm.chat(NODE_SYSTEM, user)
+        text = llm.chat(node_system, user)
         out.calls += 1
-        out.trace.append({"node": f"step {k}", "code": code_here, "explanation": text})
+        out.trace.append(record({"node": f"step {k}", "code": code_here, "explanation": text}, node))
         return f"{own_code}  -- ⟦step {k}⟧ (details collapsed)", f"⟦step {k}⟧ {text}"
 
     _, out.text = visit(root, 0)
@@ -195,6 +244,7 @@ class Leakage:
     identifiers_total: int
     identifiers_leaked: int
     code_blocks: int
+    notation: list[str] = field(default_factory=list)  # Lean-only notation found in the text
 
     @property
     def rate(self) -> float:
@@ -209,7 +259,25 @@ def leakage(decl: Declaration, text: str) -> Leakage:
     """
     idents = lemma_identifiers(decl.proof)
     leaked = {i for i in idents if any(_mentions(text, form) for form in _forms(i))}
-    return Leakage(len(idents), len(leaked), text.count("```"))
+    return Leakage(len(idents), len(leaked), text.count("```"), notation_marks(text))
+
+
+# Notation that belongs to Lean's goal display rather than to mathematical writing. Goal states
+# (`grounded`, `contrastive`) put it in front of the explainer, and copying it is a form of leakage
+# that lemma-name matching does not see: the turnstile, coercion arrows, subscripted hypothesis
+# names (`h₁`, `hx₂`) and `.succ`-style projections. Angle brackets are not counted, since
+# mathematicians use them too (inner products, generated subgroups).
+_NOTATION = {
+    "turnstile": re.compile(r"⊢"),
+    "coercion": re.compile(r"[↑⇑↥]"),
+    "hypothesis name": re.compile(r"(?<![\w\\])h[A-Za-z]*[₀-₉]+(?![\w'])"),
+    "projection": re.compile(r"\b\w+\.(?:succ|pred|val|toNat|card|natAbs|symm|trans|mp|mpr)\b"),
+}
+
+
+def notation_marks(text: str) -> list[str]:
+    """Kinds of Lean-only notation that occur in `text`, sorted (each kind listed once)."""
+    return sorted(kind for kind, rx in _NOTATION.items() if rx.search(text))
 
 
 def mask_identifiers(decl: Declaration, text: str) -> str:

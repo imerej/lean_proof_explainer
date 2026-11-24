@@ -37,14 +37,16 @@ For each theorem and each strategy:
 | `flat` | the statement + an explanation written in one pass from the whole proof |
 | `recursive` | the statement + an explanation built bottom-up over the proof tree |
 | `grounded` | as `recursive`, but every explainer call also sees Lean's goal state before that part of the proof and after each of its sub-steps |
+| `contrastive` | as `grounded`, plus Lean's verdict on routine alternatives (`simp`, `omega`, `linarith`, `nlinarith`, `norm_num`, `ring`, `positivity`, `aesop`) tried on the goal each explained part starts from, so the explanation can say why the part is needed or that it is routine |
 
-and, for `flat`/`recursive`/`grounded`, a **masked** variant in which every library lemma name from the original
+and, for `flat`/`recursive`/`grounded`/`contrastive`, a **masked** variant in which every library lemma name from the original
 proof (and any code block) is removed from the explanation.
 
 Reported per strategy: rebuild success rate, theorems gained/lost against the `none` baseline
 and against the `decoy` control,
 **leakage** (fraction of the proof's lemma names that appear verbatim in the explanation), explanation length,
-and the number of explainer calls.
+the number of explainer calls, and how often Lean-only notation (`⊢`, coercion arrows, hypothesis names
+like `h₁`, `.succ`-style projections) appears in the explanation, which matters once goal states are in the prompts.
 
 Why these controls:
 
@@ -103,7 +105,7 @@ OpenAI-compatible endpoint), then:
 python -m lpe run benchmarks/pilot.toml \
     --explainer anthropic:claude-opus-5-5 \
     --reconstructor anthropic:claude-haiku-5-5 \
-    --strategies none,decoy,flat,recursive,grounded --mask both \
+    --strategies none,decoy,flat,recursive,grounded,contrastive --mask both \
     --samples 1 --feedback 1 \
     --out results/pilot.jsonl
 
@@ -120,6 +122,8 @@ python -m lpe explain benchmarks/pilot.toml --theorem Commute.add_pow --strategy
     --explainer anthropic:claude-opus-5-5          # just print an explanation
 python -m lpe goals benchmarks/pilot.toml --theorem Commute.add_pow
                                                    # each proof step with Lean's goal state after it
+python -m lpe contrast benchmarks/pilot.toml --theorem Commute.add_pow
+                                                   # what routine tactics do on each part's goal
 python -m lpe select --out benchmarks/my_set.toml --n 50 --min-lines 12 --max-lines 40 \
     --under Mathlib/NumberTheory                   # sample a new benchmark
 ```
@@ -127,6 +131,14 @@ python -m lpe select --out benchmarks/my_set.toml --n 50 --min-lines 12 --max-li
 Goal states come from `lean/GoalStates.lean`, a small Lean program that elaborates the theorem's file
 (truncated after the theorem, as the checker sees it) with info trees enabled and prints the goals before
 and after every tactic, the same data the editor's infoview shows. They are cached in `.cache/goals/`.
+
+The verdicts for `contrastive` come from `lean/TryTactics.lean`, which elaborates the same truncated file
+and, at the goal where each explained part starts (the claim of a `have … := by`, the goal of a case, the
+theorem itself for the whole proof), runs each alternative in a fresh copy of the proof state with a
+heartbeat limit (`--heartbeats`, default 50000). A tactic "closes" the goal, "does not finish" (the
+remaining goal is shown), or "fails" (with the first line of Lean's error). Change the list with
+`--alternatives` (comma-separated, so tactics containing commas cannot be given). Results are cached in
+`.cache/contrast/`.
 
 All model calls are cached in `.cache/llm/`, so re-running or re-reporting is free. Each result row in
 the JSONL file keeps the full explanation, the per-node trace of the recursive pass, and the final
@@ -138,15 +150,17 @@ candidate proof.
 lpe/extract.py      find a declaration in a Lean file, split statement/proof, build the proof tree
 lpe/explain.py      explanation strategies (none / decoy / flat / recursive / grounded), leakage and masking
 lpe/goals.py        goal states per tactic (runs lean/GoalStates.lean), attached to proof-tree nodes
+lpe/contrast.py     routine alternatives tried at each part's goal (runs lean/TryTactics.lean)
 lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-error feedback
 lpe/lean_check.py   splice a candidate into its original file and compile it
 lpe/llm.py          small Anthropic / OpenAI-compatible clients with an on-disk cache
 lpe/imports.py      import closures, to pick theorems that are cheap to check
-lpe/cli.py          select · sanity · explain · goals · run · report
+lpe/cli.py          select · sanity · explain · goals · contrast · run · report
 benchmarks/         theorem lists (TOML)
 scripts/            setup_lean.sh: toolchain + Mathlib build without the release/cache servers
 docs/               ROADMAP.md (planned work), LOG.md (what changed when), literature.md
-lean/               Lean project pinned to Mathlib v4.36.0; GoalStates.lean (info-tree goal dump)
+lean/               Lean project pinned to Mathlib v4.36.0; GoalStates.lean (info-tree goal dump),
+                    TryTactics.lean (alternative tactics on recorded goals)
 tests/              unit tests and a core-Lean fixture (no Mathlib needed)
 ```
 
@@ -157,6 +171,9 @@ tests/              unit tests and a core-Lean fixture (no Mathlib needed)
   does not start at the beginning of its line (e.g. after `<;>` on a continuation) gets no state of its own.
   Whether goal states improve rebuild success has not been measured yet.
 - Automation (`simp`, `omega`, `aesop`) is treated as a single opaque step.
+- The `contrastive` alternatives are a fixed list of closers; they say whether a goal is routine, not
+  why a particular lemma or case split was needed. Neither goal states nor contrasts have been tested with
+  real models yet.
 - Only tactic proofs are supported; term-mode and pattern-matching proofs are skipped.
 
 ## Roadmap

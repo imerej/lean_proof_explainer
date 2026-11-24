@@ -5,4 +5,5 @@ __pycache__/
 lean/.lake/
 lean/*.lean.tmp
 lean/tmp*.lean
+lean/tmp*.json
 .env

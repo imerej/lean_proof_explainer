@@ -160,3 +160,14 @@ def test_reconstruction_uses_lean_feedback():
     rec = reconstruct(d, "Go through b.", llm, checker, samples=1, feedback_rounds=1)
     assert rec.success and rec.first_success == 2
     assert "Lean said" in calls[1][1]
+
+
+def test_notation_marks_flag_goal_display_but_not_latex():
+    from lpe.explain import notation_marks
+
+    d = find_declaration(FIXTURE, "Toy.le_add_of_le")
+    copied = "From h₁ we get ⊢ ↑n ≤ m.succ, so hx₂ closes it."
+    assert notation_marks(copied) == ["coercion", "hypothesis name", "projection", "turnstile"]
+    assert leakage(d, copied).notation == notation_marks(copied)
+    clean = r"Since $a \le b$ and $\langle x, y \rangle \ge 0$ (see Lemma 2.1), $h_1$ and $\hbar$ are fine."
+    assert notation_marks(clean) == []
