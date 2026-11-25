@@ -39,6 +39,8 @@ class Attempt:
 class Reconstruction:
     success: bool
     attempts: list[Attempt] = field(default_factory=list)
+    # One entry per independent sample drawn: did it (after its repair rounds) compile?
+    sample_success: list[bool] = field(default_factory=list)
 
     @property
     def first_success(self) -> int | None:
@@ -78,19 +80,30 @@ def reconstruct(
     samples: int = 1,
     feedback_rounds: int = 1,
     temperature: float = 0.7,
+    all_samples: bool = False,
 ) -> Reconstruction:
-    """Up to `samples` independent tries, each with up to `feedback_rounds` repairs from Lean errors."""
+    """Up to `samples` independent tries, each with up to `feedback_rounds` repairs from Lean errors.
+
+    By default sampling stops at the first compiling proof. With `all_samples`, every sample is drawn,
+    which costs more but gives the per-theorem success count that unbiased pass@k estimates need.
+    """
     prompt = build_prompt(decl, explanation)
     rec = Reconstruction(False)
     for s in range(samples):
         user = prompt
+        ok = False
         for r in range(feedback_rounds + 1):
             reply = llm.chat(SYSTEM, user, temperature=temperature if samples > 1 else 0.0, sample=s * 100 + r)
             proof = extract_proof(reply)
             result = checker.check(decl, proof)
             rec.attempts.append(Attempt(proof, result))
             if result.ok:
-                rec.success = True
-                return rec
+                ok = True
+                break
             user = prompt + "\n\n" + FEEDBACK.format(proof=proof, errors=result.errors[:3000])
+        rec.sample_success.append(ok)
+        if ok:
+            rec.success = True
+            if not all_samples:
+                break
     return rec

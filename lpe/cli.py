@@ -18,6 +18,7 @@ from .goals import GoalExtractor, render_goals, step_view
 from .lean_check import LeanChecker
 from .llm import LLM
 from .reconstruct import reconstruct
+from .stats import holm, mcnemar_exact, paired_bootstrap_ci, row_pass_at_k, wilson_interval
 
 DEFAULT_PROJECT = Path(__file__).resolve().parent.parent / "lean"
 
@@ -243,7 +244,13 @@ def cmd_run(args) -> None:
                     text = mask_identifiers(decl, ex.text) if masked else ex.text
                     leak = leakage(decl, text)
                     rec = reconstruct(
-                        decl, text, rebuilder, checker, samples=args.samples, feedback_rounds=args.feedback
+                        decl,
+                        text,
+                        rebuilder,
+                        checker,
+                        samples=args.samples,
+                        feedback_rounds=args.feedback,
+                        all_samples=args.all_samples,
                     )
                     row = {
                         "theorem": entry["name"],
@@ -255,6 +262,10 @@ def cmd_run(args) -> None:
                         "reconstructor": args.reconstructor,
                         "success": rec.success,
                         "first_success": rec.first_success,
+                        "samples": args.samples,
+                        "feedback": args.feedback,
+                        "all_samples": args.all_samples,
+                        "sample_success": rec.sample_success,
                         "attempts": len(rec.attempts),
                         "failure_reasons": [a.result.reason for a in rec.attempts if not a.result.ok],
                         "explainer_calls": ex.calls,
@@ -279,23 +290,56 @@ def cmd_run(args) -> None:
 # ------------------------------------------------------------------ report
 
 
+STRATEGY_ORDER = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3, "grounded": 4, "contrastive": 5}
+
+
+def _label(key: tuple) -> str:
+    return f"{key[0]}{' (masked)' if key[1] else ''}"
+
+
 def cmd_report(args) -> None:
     rows = [json.loads(line) for p in args.results for line in Path(p).read_text(encoding="utf-8").splitlines()]
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         groups[(r["strategy"], r["masked"])].append(r)
-    order = {"none": 0, "decoy": 1, "flat": 2, "recursive": 3, "grounded": 4, "contrastive": 5}
-    print("| strategy | masked | n | rebuilt | success | mean leak | mean chars | explainer calls | Lean notation |")
-    print("|---|---|---|---|---|---|---|---|---|")
-    for (strategy, masked), rs in sorted(groups.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1])):
+    ordered = sorted(groups.items(), key=lambda kv: (STRATEGY_ORDER.get(kv[0][0], 9), kv[0][1]))
+    print(
+        "| strategy | masked | n | rebuilt | success | 95% CI | mean leak | mean chars | explainer calls | Lean notation |"
+    )
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    for (strategy, masked), rs in ordered:
         n = len(rs)
         ok = sum(r["success"] for r in rs)
+        lo, hi = wilson_interval(ok, n)
         print(
-            f"| {strategy} | {'yes' if masked else 'no'} | {n} | {ok} | {ok / n:.0%} | "
+            f"| {strategy} | {'yes' if masked else 'no'} | {n} | {ok} | {ok / n:.0%} | {lo:.0%}–{hi:.0%} | "
             f"{sum(r['leak_rate'] for r in rs) / n:.0%} | {sum(r['explanation_chars'] for r in rs) / n:.0f} | "
             f"{sum(r['explainer_calls'] for r in rs) / n:.1f} | "
             f"{sum(bool(r.get('lean_notation')) for r in rs) / n:.0%} |"
         )
+    print("\n95% CI: Wilson score interval over theorems.")
+
+    # pass@k, when some rows drew more than one sample.
+    max_k = max((len(r.get("sample_success") or [None]) for r in rows), default=1)
+    if max_k > 1:
+        ks = [k for k in (1, 2, 4, 8, 16, 32, 64) if k <= max_k]
+        if max_k not in ks:
+            ks.append(max_k)
+        print("\npass@k (mean over theorems; n = theorems with enough samples for that k):\n")
+        print("| strategy | masked | " + " | ".join(f"pass@{k}" for k in ks) + " |")
+        print("|---|---|" + "---|" * len(ks))
+        for (strategy, masked), rs in ordered:
+            cells = []
+            for k in ks:
+                vals = [v for v in (row_pass_at_k(r, k) for r in rs) if v is not None]
+                cells.append(f"{sum(vals) / len(vals):.0%} (n={len(vals)})" if vals else "–")
+            print(f"| {strategy} | {'yes' if masked else 'no'} | " + " | ".join(cells) + " |")
+        if not all(r.get("all_samples") for r in rows if r.get("sample_success")):
+            print(
+                "\nSome rows stopped at the first success; their pass@k is the indicator of a success within the"
+                " first k samples (unbiased, but noisier than drawing all samples with `--all-samples`)."
+            )
+
     # Paired view: which theorems does each strategy rebuild that the baseline does not?
     by_thm: dict[str, dict] = defaultdict(dict)
     for r in rows:
@@ -304,16 +348,38 @@ def cmd_report(args) -> None:
         (("none", False), "Gain over the no-explanation baseline (theorems rebuilt only with an explanation):"),
         (("decoy", False), "Gain over the decoy control (an explanation of a different theorem):"),
     ]
+    printed = False
     for base, title in baselines:
         if not any(base in v for v in by_thm.values()):
             continue
         print(f"\n{title}")
-        for key in sorted({k for v in by_thm.values() for k in v if k != base and k[0] != "none"}):
+        keys = sorted(
+            {k for v in by_thm.values() for k in v if k != base and k[0] != "none"},
+            key=lambda k: (STRATEGY_ORDER.get(k[0], 9), k[1]),
+        )
+        comparisons = []
+        for key in keys:
             # Only theorems that have both rows are compared.
             pairs = [(v[key], v[base]) for v in by_thm.values() if key in v and base in v]
             gained = sum(1 for a, b in pairs if a and not b)
             lost = sum(1 for a, b in pairs if b and not a)
-            print(f"- {key[0]}{' (masked)' if key[1] else ''}: +{gained} / -{lost}  (n={len(pairs)})")
+            comparisons.append((key, pairs, gained, lost, mcnemar_exact(gained, lost)))
+        adjusted = holm([c[4] for c in comparisons])
+        for (key, pairs, gained, lost, p), p_holm in zip(comparisons, adjusted):
+            lo, hi = paired_bootstrap_ci(pairs)
+            diff = sum(int(a) - int(b) for a, b in pairs) / len(pairs) if pairs else 0.0
+            print(
+                f"- {_label(key)}: +{gained} / -{lost}  (n={len(pairs)})  "
+                f"Δ={diff:+.0%} [{lo:+.0%}, {hi:+.0%}]  p={p:.3g}  p_Holm={p_holm:.3g}"
+            )
+        printed = True
+    if printed:
+        print(
+            "\nΔ: difference in success rate on the paired theorems, with a 95% paired bootstrap interval over"
+            " theorems. p: exact McNemar test on the theorems where the two disagree; p_Holm: Holm-adjusted"
+            " within each section. With few theorems the bootstrap interval is too narrow; trust p. A result"
+            " that is not significant is unresolved, not evidence of no effect."
+        )
 
 
 # ------------------------------------------------------------------ main
@@ -393,6 +459,11 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--mask", choices=["off", "on", "both"], default="both", help="mask Lean identifiers in explanations")
     s.add_argument("--samples", type=int, default=1)
     s.add_argument("--feedback", type=int, default=1, help="repair rounds per sample using Lean's errors")
+    s.add_argument(
+        "--all-samples",
+        action="store_true",
+        help="draw every sample even after one succeeds (costlier; gives unbiased pass@k in the report)",
+    )
     s.add_argument("--min-children", type=int, default=1)
     s.add_argument("--timeout", type=int, default=900)
     s.add_argument("--cache", default=".cache/llm")

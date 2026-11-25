@@ -48,6 +48,15 @@ and against the `decoy` control,
 the number of explainer calls, and how often Lean-only notation (`⊢`, coercion arrows, hypothesis names
 like `h₁`, `.succ`-style projections) appears in the explanation, which matters once goal states are in the prompts.
 
+Because the benchmark is small, `lpe report` also gives the uncertainty: a 95% Wilson interval for each
+success rate, and, for every gain over `none` and over `decoy`, the theorems gained and lost, the
+difference in success rate with a paired bootstrap interval over theorems, an exact McNemar p-value and
+its Holm adjustment within the section. With 12 theorems a strategy needs at least 6 gained and none lost
+to reach p < 0.05, so the pilot can only detect large effects. When `--samples` is above 1, the report
+adds pass@k; rows record the outcome of every sample drawn (`sample_success`), and `--all-samples`
+keeps sampling after the first success so that pass@k uses the unbiased estimator instead of
+"success within the first k samples".
+
 Why these controls:
 
 - **Memorisation.** Mathlib is in every model's training data. The `none` baseline measures what the
@@ -153,6 +162,7 @@ lpe/goals.py        goal states per tactic (runs lean/GoalStates.lean), attached
 lpe/contrast.py     routine alternatives tried at each part's goal (runs lean/TryTactics.lean)
 lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-error feedback
 lpe/lean_check.py   splice a candidate into its original file and compile it
+lpe/stats.py        intervals, paired tests and pass@k for `lpe report`
 lpe/llm.py          small Anthropic / OpenAI-compatible clients with an on-disk cache
 lpe/imports.py      import closures, to pick theorems that are cheap to check
 lpe/cli.py          select · sanity · explain · goals · contrast · run · report
