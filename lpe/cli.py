@@ -209,7 +209,7 @@ def cmd_run(args) -> None:
 
     bench = list(load_bench(Path(args.bench), project))
     files = [entry["file"] for entry, _ in bench]
-    with out.open("a", encoding="utf-8") as fh:
+    with out.open("w" if args.overwrite else "a", encoding="utf-8") as fh:
         for i, (entry, decl) in enumerate(bench):
             for strategy in strategies:
                 for masked in ([False, True] if args.mask == "both" else [args.mask == "on"]):
@@ -469,7 +469,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--cache", default=".cache/llm")
     s.add_argument("--out", default="results/run.jsonl")
     _contrast_args(s)
-    s.add_argument("--overwrite", action="store_true")
+    s.add_argument("--overwrite", action="store_true", help="replace the output file instead of resuming it")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("report", help="summarise result files")

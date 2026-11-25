@@ -174,3 +174,28 @@ def test_run_and_report_with_samples(tmp_path, monkeypatch, capsys):
     assert "stopped at the first success" not in report
     assert "- flat: +2 / -0  (n=2)  Δ=+100% [+100%, +100%]  p=0.5  p_Holm=0.5" in report
 
+
+def test_overwrite_replaces_instead_of_appending(tmp_path, monkeypatch):
+    project = tmp_path / "lean"
+    mathlib = project / ".lake" / "packages" / "mathlib"
+    mathlib.mkdir(parents=True)
+    shutil.copy(FIXTURE, mathlib / "Toy.lean")
+    bench = tmp_path / "bench.toml"
+    bench.write_text('[[theorem]]\nname = "Toy.add_comm\'"\nfile = "Toy.lean"\n', encoding="utf-8")
+    real_llm = cli.LLM
+
+    def fake_llm(spec, cache_dir=None):
+        llm = real_llm(spec, cache_dir=None)
+        llm.set_mock(lambda s, m: "```lean\nrfl\n```")
+        return llm
+
+    monkeypatch.setattr(cli, "LLM", fake_llm)
+    monkeypatch.setattr(cli, "LeanChecker", FakeChecker)
+    out = tmp_path / "results.jsonl"
+    argv = ["--project", str(project), "run", str(bench), "--reconstructor", "mock:r",
+            "--strategies", "none", "--feedback", "0", "--out", str(out)]  # fmt: skip
+    cli.main(argv)
+    cli.main(argv)  # resumes: nothing left to do
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 1
+    cli.main(argv + ["--overwrite"])  # reruns, replacing the file
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 1
