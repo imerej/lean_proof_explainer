@@ -1,7 +1,8 @@
 # Roadmap
 
 Prioritised work items. Each item says what to build and how to tell whether it worked.
-Citations refer to [literature.md](literature.md). Done items move to the bottom with the date.
+Citations refer to [literature.md](literature.md). Done items move to the bottom with the date;
+item numbers are kept, so the log can refer to them.
 
 ## Next
 
@@ -41,9 +42,6 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
    under the theorem's hypotheses (cf. Lean-probing in Mohammad & Sheikh 2026). A finer and
    leakage-independent signal than whole-proof rebuild.
 
-8. **Statistics in `lpe report`.** pass@k for `--samples > 1`, McNemar/sign test for paired strategy
-   comparisons, bootstrap confidence intervals. Pilot-sized samples (~12) need these to say anything.
-
 9. **Held-out theorems.** Theorems added to Mathlib after the models' training cut-off, found by
    `git log` dates in the Mathlib checkout, to separate explanation from memorisation.
 
@@ -77,6 +75,20 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
     specific ingredient is needed, closer to the best-move-vs-alternative contrasts of chess.
     *Measure:* as item 13, contrastive-rich vs. contrastive.
 
+16. **Repair rounds vs. fresh samples.** Run the rebuilder at equal attempt budgets with
+    `--samples 4 --feedback 0 --all-samples` against `--samples 2 --feedback 1 --all-samples` (and count
+    tokens, since a repair prompt is much longer). Li & Li 2026 find that Lean feedback never beats
+    fresh resampling for their provers, and that showing the failed proof makes the model copy it.
+    *Measure:* pass@k at equal attempts and at equal tokens, per strategy; if feedback does not help,
+    make `--feedback 0` the default and spend the budget on samples.
+
+17. **Benchmark size from a power calculation.** With the paired exact test on 12 theorems, a strategy
+    must rebuild at least 6 more theorems than the baseline with none lost to reach p < 0.05, which only
+    a very large effect can do. Use the first real pilot's discordance rate and Miller 2024's power
+    formula to set the size of the next benchmark (item 9), and add file-clustered intervals since
+    theorems from one Mathlib file are not independent. *Measure:* the number of theorems needed to
+    detect a 15-point gain with 80% power.
+
 ## Done
 
 - 2026-11-23 — `scripts/setup_lean.sh`: toolchain from GitHub releases + build of the benchmark's
@@ -88,3 +100,7 @@ Citations refer to [literature.md](literature.md). Done items move to the bottom
 - 2026-11-25 — `contrastive` strategy: Lean's verdict on routine alternatives (`simp`, `omega`,
   `linarith`, …) at the goal each explained part starts from (`lean/TryTactics.lean`, `lpe/contrast.py`,
   `lpe contrast`); `lean_notation` leakage per result row and in `lpe report`.
+- 2026-11-26 — Statistics in `lpe report` (`lpe/stats.py`): Wilson intervals per strategy, exact
+  McNemar p-values with Holm adjustment and paired bootstrap intervals for the gains over `none` and
+  `decoy`, pass@k from per-sample outcomes (`sample_success` in result rows; `run --all-samples` draws
+  every sample for the unbiased estimator).

@@ -158,3 +158,63 @@ One entry per working session, newest last. Dates are Korea time.
 - Consider whether the alternatives should run with a fixed extra import (e.g. `Mathlib.Tactic`) so
   every file gets the same closers; that changes what "routine" means and would need its own build.
 - When an API key is available: run the pilot with `none,decoy,flat,recursive,grounded,contrastive`.
+
+## 2026-11-26 (Thu) — statistics in `lpe report`, per-sample outcomes
+
+**Changed**
+
+- `lpe/stats.py` (pure Python, no new dependency): Wilson score intervals, the exact McNemar test on
+  discordant theorems, a seeded paired percentile bootstrap over theorems, Holm's step-down adjustment,
+  and the unbiased pass@k estimator.
+- `lpe report`: a 95% CI column (Wilson) for each strategy's success rate; every line of the
+  "gain over `none`" and "gain over `decoy`" sections now has the paired difference in success rate with
+  its bootstrap interval, the exact McNemar p-value and the Holm-adjusted p-value within that section;
+  a pass@k table when rows have more than one sample. With six strategies (plus masked variants) on
+  12 theorems the raw +gained/−lost counts invited reading noise as signal (ROADMAP item 8).
+- `reconstruct` records whether each independent sample (including its repair rounds) compiled, and
+  result rows carry `sample_success`, `samples`, `feedback` and `all_samples`. New `run --all-samples`
+  keeps sampling after the first success, which costs more but gives per-theorem success counts for the
+  unbiased pass@k estimator; without it the report uses "a success within the first k samples", which is
+  also unbiased but noisier. Rows written before this change count as one sample.
+- Choices follow the small-benchmark practice of Li & Li 2026 (paired problem-level contrasts, exact
+  tests, Holm) and Miller 2024 (inference on per-question paired differences); Hariri et al. 2025 is the
+  reason pass@k is shown as a description, not used for the tests.
+- `docs/literature.md`: new section on evaluation statistics (Miller 2024; Hariri et al. 2025; Li & Li
+  2026 on Lean feedback vs. fresh samples). `docs/ROADMAP.md`: item 8 done; new items 16 (repair rounds
+  vs. fresh samples at equal budget) and 17 (size the next benchmark from a power calculation, with
+  file-clustered intervals).
+
+**Observed while testing the report**
+
+- On synthetic 12-theorem data, the percentile bootstrap interval excluded zero for a +5/−0 gain while
+  the exact test gave p = 0.0625: at this size the bootstrap is too narrow, and the report says to go by
+  p. The smallest gain the pilot can call significant is 6 theorems with none lost (p = 0.031); the
+  pilot can only detect very large effects, which is the argument for ROADMAP item 17.
+
+- Fixed: `run --overwrite` ignored the existing rows but still appended to the file, so a rerun
+  duplicated every row and inflated `n` in the report. It now replaces the file.
+
+**Verified**
+
+- `python3 -m pytest -q`: 46 passed. New tests check the statistics against hand-computed values,
+  per-sample recording with and without `--all-samples` and with repair rounds, an offline
+  `run --samples 4 --all-samples` + `report` end to end with mock models and a fake checker, and that
+  `--overwrite` replaces rather than appends (this test fails on the previous code).
+- `python3 -m lpe sanity benchmarks/pilot.toml`: all 12 ok, after rebuilding the pilot closure from a
+  fresh checkout with `scripts/setup_lean.sh`.
+- Smoke run with the real Lean checker on the first three pilot theorems, `none,flat`,
+  `--samples 2 --all-samples --feedback 0`, with mock models (the rebuilder writes the original proof
+  on every second call, and only when shown an explanation): `flat` 3/3 with pass@1 50% and pass@2 100%,
+  `none` 0/3, and the paired line `+3 / -0 (n=3) p=0.25`. This tests the plumbing only; it is not an
+  experimental result.
+- No model API key was available, so there are still no real explain/rebuild numbers.
+
+**Next**
+
+- Friday (robustness & engineering): the checker starts one `lake env lean` per candidate; with
+  `--all-samples` the number of checks grows with the samples, so reusing one Lean process (REPL) or
+  checking candidates in parallel is now worth doing.
+- ROADMAP item 14 (verdict faithfulness) still has no plumbing; item 16 needs only an API key and the
+  flags added tonight.
+- When an API key is available: run the pilot with `none,decoy,flat,recursive,grounded,contrastive`,
+  then use its discordance rates for the power calculation of item 17.

@@ -183,7 +183,52 @@ replicate on other checkpoints, and the author presents the result as a bound ra
 *Relevance to this repo:* the same intervention logic tests whether the "why not" sentences of a
 `contrastive` explanation are used by the rebuilder: remove (or invert) only those sentences and compare
 rebuild success, with a length-matched deletion as control. Its fragile effect sizes are another
-argument for paired statistics before claiming any strategy difference (ROADMAP item 8).
+argument for paired statistics before claiming any strategy difference (ROADMAP item 8, done 2026-11-26).
+
+## Evaluation statistics on small benchmarks
+
+**Miller. *Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations.* arXiv:2411.00640, 2024.**
+<https://arxiv.org/abs/2411.00640>
+Treats an eval as a sample from a larger population of questions and derives standard errors for its
+score, with clustered standard errors when questions come in groups (in its examples these are up to
+about three times the naive ones). For comparing two models it recommends working with per-question
+paired differences, which removes the shared difficulty of each question, and reporting the difference,
+its standard error and the correlation between the models. It also suggests drawing several answers per
+question to reduce within-question noise (without lowering the temperature, which changes the quantity
+being measured) and gives a power formula for the number of questions needed to detect a given effect.
+*Relevance to this repo:* every strategy comparison here is paired by theorem, which is what `lpe report`
+now uses. Benchmark theorems also cluster by Mathlib file (and the decoy pairs files deliberately), so
+file-clustered intervals are the natural next refinement; and the power formula says how large the
+benchmark must grow before a realistic gain can be seen at all (ROADMAP item 17).
+
+**Hariri, Samandar, Hinczewski, Chaudhary. *Don't Pass@k: A Bayesian Framework for Large Language Model Evaluation.* arXiv:2510.04265, 2025.**
+<https://arxiv.org/abs/2510.04265>
+Argues that pass@k gives unstable rankings when only a few trials per question are affordable, as on
+small competition sets. It models each question's outcome with a Dirichlet prior over rubric categories,
+which gives closed-form posterior means and credible intervals; with a uniform prior the posterior mean
+orders models as average accuracy over trials does. The proposed rule is to report the posterior mean
+with an interval, call a difference only when the intervals separate, and add trials until the intervals
+are narrow enough.
+*Relevance to this repo:* a warning against reading too much into pass@k columns from a handful of
+samples. The report therefore keeps pass@k as a description and bases its tests on paired per-theorem
+outcomes; drawing all samples (`--all-samples`) gives the per-theorem success rates that an average or
+posterior summary needs.
+
+**Li, Li. *Repair, Retry, and the Cost of Hindsight: Verifier Feedback in Formal Theorem Proving.* arXiv:2610.22698, 2026.**
+<https://arxiv.org/abs/2610.22698>
+Asks whether showing a prover its failed Lean proof and the compiler error helps it repair the proof,
+compared with simply sampling a fresh attempt. Controlled single-step experiments vary what is shown
+(the failed proof, a correct or a shuffled error message, another theorem's failed proof), and
+sequential experiments run long repair histories. Seeing its own failed proof makes the model copy it
+and lowers success; correct diagnostics help one model on outdated syntax but not the other; and at equal
+attempts or equal tokens no feedback condition beats fresh resampling. Analysis uses problem-level
+paired bootstrap intervals, exact randomization tests and Holm adjustment because the problem banks are
+small.
+*Relevance to this repo:* `lpe run` spends rebuild attempts on repair rounds (`--feedback 1` by
+default). Whether that budget would be better spent on independent samples is an empirical question for
+our rebuilder, and it interacts with the explanation: a repair prompt shows the explanation again next to
+a failed proof. It also supports the statistical choices made in `lpe report` (paired by theorem, exact
+tests, Holm). See ROADMAP item 16.
 
 ## Not yet read / to follow up
 
