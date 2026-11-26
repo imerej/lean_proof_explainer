@@ -15,12 +15,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from .cachefile import atomic_write_text
 
 
 @dataclass
@@ -40,6 +43,7 @@ class LLM:
         self.cache_dir = cache_dir
         self.max_tokens = max_tokens
         self.usage = Usage()
+        self._lock = threading.Lock()  # usage counters are shared by worker threads (`run --jobs`)
         self._mock: Callable[[str, list[dict]], str] | None = None
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -54,15 +58,17 @@ class LLM:
         ).hexdigest()
         path = self.cache_dir / f"{key}.json" if self.cache_dir and self.provider != "mock" else None
         if path and path.exists():
-            self.usage.cached += 1
+            with self._lock:
+                self.usage.cached += 1
             return json.loads(path.read_text(encoding="utf-8"))["text"]
 
         text, tin, tout = self._call(system, messages, temperature)
-        self.usage.calls += 1
-        self.usage.input_tokens += tin
-        self.usage.output_tokens += tout
+        with self._lock:
+            self.usage.calls += 1
+            self.usage.input_tokens += tin
+            self.usage.output_tokens += tout
         if path:
-            path.write_text(json.dumps({"spec": self.spec, "text": text}, ensure_ascii=False), encoding="utf-8")
+            atomic_write_text(path, json.dumps({"spec": self.spec, "text": text}, ensure_ascii=False))
         return text
 
     def _call(self, system: str, messages: list[dict], temperature: float) -> tuple[str, int, int]:

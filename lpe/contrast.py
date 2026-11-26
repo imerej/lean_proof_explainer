@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .cachefile import atomic_write_text
 from .extract import Declaration, ProofNode, parse_proof_tree
 from .goals import ProofStates, proof_first_line
 
@@ -167,7 +168,7 @@ class ContrastRunner:
             return Contrasts.from_json(path.read_text(encoding="utf-8"))
         result = self._run(decl, source, targets)
         if path and not result.error:
-            path.write_text(result.to_json(), encoding="utf-8")
+            atomic_write_text(path, result.to_json())
         return result
 
     def _run(self, decl: Declaration, source: str, targets: list[tuple[int, int]]) -> Contrasts:

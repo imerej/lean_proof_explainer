@@ -6,9 +6,11 @@ import argparse
 import json
 import random
 import sys
+import threading
 import time
 import tomllib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .contrast import DEFAULT_ALTERNATIVES, ContrastRunner, probe_targets, render_verdicts, verdict_summary
@@ -78,11 +80,14 @@ def cmd_select(args) -> None:
 
 
 def cmd_sanity(args) -> None:
-    """Check that each original proof compiles through the same splice-and-check path."""
+    """Check that each original proof compiles through the same splice-and-check path.
+
+    Never uses the check cache: the point is to test the Lean build as it is now."""
     checker = LeanChecker(args.project, timeout=args.timeout)
+    bench = list(load_bench(Path(args.bench), args.project))
+    results = _for_each(bench, lambda item: checker.check(item[1], item[1].proof), args.jobs)
     bad = 0
-    for entry, decl in load_bench(Path(args.bench), args.project):
-        res = checker.check(decl, decl.proof)
+    for (entry, decl), res in zip(bench, results):
         status = "ok " if res.ok else "BAD"
         bad += not res.ok
         print(f"{status} {res.seconds:6.1f}s  {entry['name']}  ({decl.line_count} lines)  {res.reason}")
@@ -191,9 +196,22 @@ def cmd_goals(args) -> None:
 # ------------------------------------------------------------------ run
 
 
+def _check_cache(args) -> Path | None:
+    return None if args.no_check_cache else Path(args.cache).parent / "check"
+
+
+def _print_check_stats(checker) -> None:
+    stats = getattr(checker, "stats", None)
+    if stats is not None:
+        print(
+            f"checker: {stats.lean_runs} Lean runs ({stats.lean_seconds:.0f}s), "
+            f"{stats.cache_hits} candidates answered from the check cache"
+        )
+
+
 def cmd_run(args) -> None:
     project = args.project
-    checker = LeanChecker(project, timeout=args.timeout)
+    checker = LeanChecker(project, timeout=args.timeout, cache_dir=_check_cache(args))
     explainer = LLM(args.explainer, cache_dir=Path(args.cache)) if args.explainer else None
     rebuilder = LLM(args.reconstructor, cache_dir=Path(args.cache))
     strategies = args.strategies.split(",")
@@ -209,82 +227,105 @@ def cmd_run(args) -> None:
 
     bench = list(load_bench(Path(args.bench), project))
     files = [entry["file"] for entry, _ in bench]
-    with out.open("w" if args.overwrite else "a", encoding="utf-8") as fh:
-        for i, (entry, decl) in enumerate(bench):
-            for strategy in strategies:
-                for masked in ([False, True] if args.mask == "both" else [args.mask == "on"]):
-                    # Masking removes the theorem's own lemma names; it is meaningless for the
-                    # baseline and for a decoy explanation written about another theorem.
-                    if strategy in ("none", "decoy") and masked:
+    lock = threading.Lock()
+
+    def run_theorem(i: int, fh) -> None:
+        """All strategies for one theorem, in order. Workers own whole theorems, so the goal-state
+        and verdict extraction for a theorem is never started twice at once."""
+        entry, decl = bench[i]
+        for strategy in strategies:
+            for masked in ([False, True] if args.mask == "both" else [args.mask == "on"]):
+                # Masking removes the theorem's own lemma names; it is meaningless for the
+                # baseline and for a decoy explanation written about another theorem.
+                if strategy in ("none", "decoy") and masked:
+                    continue
+                key = (entry["name"], strategy, masked)
+                if key in done:
+                    continue
+                t0 = time.monotonic()
+                if strategy == "decoy":
+                    ex = decoy_explanation(bench[pick_donor(files, i)][1], explainer)
+                elif strategy in ("grounded", "contrastive"):
+                    states = goals.states(decl)
+                    if states.error:
+                        first = (states.error.strip().splitlines() or ["?"])[0]
+                        print(f"! {entry['name']:<40} {strategy:<10} skipped, no goal states: {first}", flush=True)
                         continue
-                    key = (entry["name"], strategy, masked)
-                    if key in done:
-                        continue
-                    t0 = time.monotonic()
-                    if strategy == "decoy":
-                        ex = decoy_explanation(bench[pick_donor(files, i)][1], explainer)
-                    elif strategy in ("grounded", "contrastive"):
-                        states = goals.states(decl)
-                        if states.error:
-                            first = (states.error.strip().splitlines() or ["?"])[0]
-                            print(f"! {entry['name']:<40} {strategy:<10} skipped, no goal states: {first}")
+                    contrasts = None
+                    if strategy == "contrastive":
+                        contrasts = runner.contrasts(decl, states, args.min_children)
+                        if contrasts.error:
+                            first = (contrasts.error.strip().splitlines() or ["?"])[0]
+                            print(f"! {entry['name']:<40} {strategy:<10} skipped, no verdicts: {first}", flush=True)
                             continue
-                        contrasts = None
-                        if strategy == "contrastive":
-                            contrasts = runner.contrasts(decl, states, args.min_children)
-                            if contrasts.error:
-                                first = (contrasts.error.strip().splitlines() or ["?"])[0]
-                                print(f"! {entry['name']:<40} {strategy:<10} skipped, no verdicts: {first}")
-                                continue
-                        ex = explain(
-                            decl, strategy, explainer, min_children=args.min_children, states=states, contrasts=contrasts
-                        )
-                    else:
-                        ex = explain(decl, strategy, explainer, min_children=args.min_children)
-                    text = mask_identifiers(decl, ex.text) if masked else ex.text
-                    leak = leakage(decl, text)
-                    rec = reconstruct(
-                        decl,
-                        text,
-                        rebuilder,
-                        checker,
-                        samples=args.samples,
-                        feedback_rounds=args.feedback,
-                        all_samples=args.all_samples,
+                    ex = explain(
+                        decl, strategy, explainer, min_children=args.min_children, states=states, contrasts=contrasts
                     )
-                    row = {
-                        "theorem": entry["name"],
-                        "file": entry["file"],
-                        "proof_lines": decl.line_count,
-                        "strategy": strategy,
-                        "masked": masked,
-                        "explainer": args.explainer if strategy != "none" else None,
-                        "reconstructor": args.reconstructor,
-                        "success": rec.success,
-                        "first_success": rec.first_success,
-                        "samples": args.samples,
-                        "feedback": args.feedback,
-                        "all_samples": args.all_samples,
-                        "sample_success": rec.sample_success,
-                        "attempts": len(rec.attempts),
-                        "failure_reasons": [a.result.reason for a in rec.attempts if not a.result.ok],
-                        "explainer_calls": ex.calls,
-                        "explanation_chars": len(text),
-                        "leak_rate": round(leak.rate, 3),
-                        "leaked_identifiers": leak.identifiers_leaked,
-                        "proof_identifiers": leak.identifiers_total,
-                        "lean_notation": leak.notation,
-                        "explanation": text,
-                        "trace": ex.trace,
-                        "final_proof": rec.attempts[-1].proof if rec.attempts else "",
-                        "seconds": round(time.monotonic() - t0, 1),
-                    }
+                else:
+                    ex = explain(decl, strategy, explainer, min_children=args.min_children)
+                text = mask_identifiers(decl, ex.text) if masked else ex.text
+                leak = leakage(decl, text)
+                rec = reconstruct(
+                    decl,
+                    text,
+                    rebuilder,
+                    checker,
+                    samples=args.samples,
+                    feedback_rounds=args.feedback,
+                    all_samples=args.all_samples,
+                )
+                row = {
+                    "theorem": entry["name"],
+                    "file": entry["file"],
+                    "proof_lines": decl.line_count,
+                    "strategy": strategy,
+                    "masked": masked,
+                    "explainer": args.explainer if strategy != "none" else None,
+                    "reconstructor": args.reconstructor,
+                    "success": rec.success,
+                    "first_success": rec.first_success,
+                    "samples": args.samples,
+                    "feedback": args.feedback,
+                    "all_samples": args.all_samples,
+                    "sample_success": rec.sample_success,
+                    "attempts": len(rec.attempts),
+                    "failure_reasons": [a.result.reason for a in rec.attempts if not a.result.ok],
+                    "explainer_calls": ex.calls,
+                    "explanation_chars": len(text),
+                    "leak_rate": round(leak.rate, 3),
+                    "leaked_identifiers": leak.identifiers_leaked,
+                    "proof_identifiers": leak.identifiers_total,
+                    "lean_notation": leak.notation,
+                    "explanation": text,
+                    "trace": ex.trace,
+                    "final_proof": rec.attempts[-1].proof if rec.attempts else "",
+                    "seconds": round(time.monotonic() - t0, 1),
+                }
+                mark = "✓" if rec.success else "✗"
+                with lock:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
                     fh.flush()
-                    mark = "✓" if rec.success else "✗"
-                    print(f"{mark} {entry['name']:<40} {strategy:<10} masked={masked!s:<5} leak={leak.rate:.0%} attempts={len(rec.attempts)}")
+                    print(
+                        f"{mark} {entry['name']:<40} {strategy:<10} masked={masked!s:<5} "
+                        f"leak={leak.rate:.0%} attempts={len(rec.attempts)}",
+                        flush=True,
+                    )
+
+    with out.open("w" if args.overwrite else "a", encoding="utf-8") as fh:
+        _for_each(range(len(bench)), lambda i: run_theorem(i, fh), args.jobs)
     print(f"explainer usage: {explainer.usage if explainer else '-'}")
     print(f"reconstructor usage: {rebuilder.usage}")
+    _print_check_stats(checker)
+
+
+def _for_each(items, fn, jobs: int) -> list:
+    """`fn` over `items`, on `jobs` threads; results in input order. The work is waiting on Lean
+    processes and model APIs, so threads are enough. The first exception is re-raised."""
+    items = list(items)
+    if jobs <= 1 or len(items) <= 1:
+        return [fn(x) for x in items]
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        return list(pool.map(fn, items))
 
 
 # ------------------------------------------------------------------ report
@@ -415,6 +456,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("bench")
     s.add_argument("--timeout", type=int, default=900)
     s.add_argument("-v", "--verbose", action="store_true")
+    s.add_argument("--jobs", type=int, default=1, help="theorems checked in parallel (each runs its own Lean)")
     s.set_defaults(fn=cmd_sanity)
 
     s = sub.add_parser("explain", help="print explanations without reconstructing")
@@ -468,6 +510,17 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--timeout", type=int, default=900)
     s.add_argument("--cache", default=".cache/llm")
     s.add_argument("--out", default="results/run.jsonl")
+    s.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="theorems processed in parallel; each runs its own Lean, so mind memory (rows are written as they finish)",
+    )
+    s.add_argument(
+        "--no-check-cache",
+        action="store_true",
+        help="always run Lean, instead of reusing verdicts on identical candidates from <cache parent>/check",
+    )
     _contrast_args(s)
     s.add_argument("--overwrite", action="store_true", help="replace the output file instead of resuming it")
     s.set_defaults(fn=cmd_run)

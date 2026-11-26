@@ -153,6 +153,19 @@ All model calls are cached in `.cache/llm/`, so re-running or re-reporting is fr
 the JSONL file keeps the full explanation, the per-node trace of the recursive pass, and the final
 candidate proof.
 
+Lean's verdict on a candidate is cached in `.cache/check/`, keyed by the exact file Lean compiles, the
+toolchain and `lean/lake-manifest.json` (so a Mathlib bump invalidates it). A rebuilder that proposes
+the same candidate twice (another sample, the masked run, a rerun after an interruption) costs one Lean
+run. Timeouts, crashes and failures of the surrounding file (`environment`, e.g. a missing `.olean`) are
+never cached and are reported under their own reason rather than as a wrong proof. `--no-check-cache`
+turns this off; `sanity` never uses it. At the end of a run the checker prints how many Lean runs it
+made and how many candidates the cache answered.
+
+`run --jobs N` (and `sanity --jobs N`) works on N theorems at once; each worker owns a whole theorem
+(all its strategies, in order), and rows are appended as they finish, so their order in the file differs
+from a serial run but the rows themselves do not. Every worker starts its own Lean process with the
+theorem's imports loaded, so memory, not cores, is usually the limit.
+
 ## Layout
 
 ```
@@ -161,7 +174,8 @@ lpe/explain.py      explanation strategies (none / decoy / flat / recursive / gr
 lpe/goals.py        goal states per tactic (runs lean/GoalStates.lean), attached to proof-tree nodes
 lpe/contrast.py     routine alternatives tried at each part's goal (runs lean/TryTactics.lean)
 lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-error feedback
-lpe/lean_check.py   splice a candidate into its original file and compile it
+lpe/lean_check.py   splice a candidate into its original file and compile it; verdict cache
+lpe/cachefile.py    atomic writes for the on-disk caches (safe with `run --jobs`)
 lpe/stats.py        intervals, paired tests and pass@k for `lpe report`
 lpe/llm.py          small Anthropic / OpenAI-compatible clients with an on-disk cache
 lpe/imports.py      import closures, to pick theorems that are cheap to check

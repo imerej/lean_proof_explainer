@@ -21,6 +21,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .cachefile import atomic_write_text
 from .extract import Declaration, ProofNode
 
 SCRIPT = "GoalStates.lean"
@@ -133,7 +134,7 @@ class GoalExtractor:
             return ProofStates.from_json(path.read_text(encoding="utf-8"))
         result = self._run(decl, source)
         if path and not result.error:
-            path.write_text(result.to_json(), encoding="utf-8")
+            atomic_write_text(path, result.to_json())
         return result
 
     def _run(self, decl: Declaration, source: str) -> ProofStates:
