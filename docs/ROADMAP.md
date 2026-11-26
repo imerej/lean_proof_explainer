@@ -89,6 +89,14 @@ item numbers are kept, so the log can refer to them.
     theorems from one Mathlib file are not independent. *Measure:* the number of theorems needed to
     detect a 15-point gain with 80% power.
 
+18. **Warm checker.** Keep one Lean REPL per theorem with the truncated file prefix already elaborated,
+    and check each candidate as a new command in that environment instead of a fresh `lake env lean`
+    (Kimina Lean Server's import cache; Shen & Shi 2026 for reusing elaborated state). Needs the
+    leanprover-community `repl` built against v4.36.0 from GitHub, and care that a candidate cannot leave
+    anything behind for the next (each check must start from the saved environment). *Measure:* seconds
+    per check on the pilot against the cold checker, with identical verdicts on a set of right and wrong
+    candidates.
+
 ## Done
 
 - 2026-11-23 — `scripts/setup_lean.sh`: toolchain from GitHub releases + build of the benchmark's
@@ -104,3 +112,6 @@ item numbers are kept, so the log can refer to them.
   McNemar p-values with Holm adjustment and paired bootstrap intervals for the gains over `none` and
   `decoy`, pass@k from per-sample outcomes (`sample_success` in result rows; `run --all-samples` draws
   every sample for the unbiased estimator).
+- 2026-11-27 — Checker cache (`.cache/check/`, keyed by the compiled file, toolchain and Lake manifest;
+  machine failures never cached and reported as `environment`/`crash`/`timeout`) and `run --jobs` /
+  `sanity --jobs` for per-theorem parallelism.

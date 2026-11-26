@@ -218,3 +218,60 @@ One entry per working session, newest last. Dates are Korea time.
   flags added tonight.
 - When an API key is available: run the pilot with `none,decoy,flat,recursive,grounded,contrastive`,
   then use its discordance rates for the power calculation of item 17.
+
+## 2026-11-27 (Fri) — checker cache, `environment` failures, `--jobs`
+
+**Changed**
+
+- `lpe/lean_check.py`: verdicts are cached in `.cache/check/`, keyed by the exact file Lean compiles
+  (the candidate spliced into the truncated original file, plus the `#print axioms` line), the toolchain,
+  `lean/lake-manifest.json` and a checker version number. A cached result carries its original errors, so
+  repair prompts are unchanged. `run` uses it by default (`--no-check-cache` to turn it off); `sanity`
+  never does, since its job is to test the current build. The checker counts Lean runs and cache hits,
+  and `run` prints them at the end. Rebuilders repeat themselves across samples, masked/unmasked runs and
+  resumed runs, and each repeat used to cost a full `lake env lean` with Mathlib imports loaded.
+- Fixed: errors in the file *before* the declaration (in practice, an import whose `.olean` is not built)
+  were filtered out as "not the candidate's", after which the missing `#print axioms` output made the
+  check fail with `axioms used: []`. Such failures are now reported with reason `environment` and the
+  real message; a Lean/Lake exit without any diagnostic is reported as `crash`. Neither is cached, nor are
+  timeouts, since they describe the machine rather than the candidate. This matters for the report:
+  `failure_reasons` no longer mixes setup problems into wrong proofs.
+- `run --jobs N` and `sanity --jobs N`: N theorems at once on threads (the work is waiting on Lean and on
+  model APIs). A worker owns a whole theorem, so goal-state and verdict extraction for a theorem never
+  run twice at once, and rows of one theorem stay in strategy order; rows are appended as they finish.
+  All on-disk caches (LLM replies, goal states, verdicts, checks) are now written atomically
+  (`lpe/cachefile.py`), and the LLM usage counters are locked.
+- Design follows the two cheap parts of Kimina Lean Server (Dos Santos et al. 2025): a pool of
+  workers and reuse of work already done. Its third part, a warm REPL per import header, is ROADMAP
+  item 18 (new). `docs/literature.md` has a new section on checking infrastructure (Kimina Lean Server;
+  AXLE and Shen & Shi 2026 on proof-state snapshotting, the latter two from their abstracts only).
+
+**Verified**
+
+- `python3 -m pytest -q`: 56 passed (Lean built). New tests use a stand-in for `lake` that counts its
+  invocations: identical candidates run Lean once (also across checker instances); a changed manifest or
+  toolchain invalidates the cache; `environment`, `crash` and `timeout` results are classified and never
+  written; banned tokens never reach Lean; a corrupt cache entry is rechecked; concurrent atomic writes
+  leave one complete file; `run --jobs 3` writes exactly the rows of `run --jobs 1` (6 theorems ×
+  5 strategy/mask pairs) and resumes correctly; `sanity --jobs 4` prints in benchmark order. One test
+  round-trips the cache with the real Lean checker.
+- `python3 -m lpe sanity benchmarks/pilot.toml`: all 12 ok, after rebuilding the pilot closure from a
+  fresh checkout with `scripts/setup_lean.sh`. Wall time 22.5 s serially, 13.0 s with `--jobs 2` on this
+  2-core machine.
+- A file importing a module that is not built (`Mathlib.Analysis.SpecialFunctions.Gamma.Basic`) is now
+  reported as `environment` with Lean's "object file … does not exist" message, and nothing is cached.
+- Smoke run with the real checker on the first four pilot theorems, `none,flat`, `--mask both
+  --samples 4 --all-samples --feedback 0 --jobs 2`, with mock models (the rebuilder alternates between
+  `simp` and the original proof): 48 candidates, 8 Lean runs, 40 answered from the cache; a rerun with
+  `--overwrite` made no Lean runs. The mock rebuilder repeats itself far more than a real model would, so
+  this shows the plumbing, not the saving to expect. No model API key was available; there are still no
+  real explain/rebuild numbers.
+
+**Next**
+
+- Saturday (training groundwork, ROADMAP item 10): export rows as a training dataset with
+  reward = success − λ·leakage; the check cache makes best-of-n explanation selection cheaper to score.
+- ROADMAP item 18 (warm checker): build the leanprover-community `repl` for v4.36.0 from GitHub and
+  measure seconds per check against the cold checker; the cache only helps repeated candidates.
+- When an API key is available: run the pilot with all six strategies and `--jobs 2`, and record the
+  cache hit rate of a real rebuilder.

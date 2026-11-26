@@ -230,6 +230,47 @@ our rebuilder, and it interacts with the explanation: a repair prompt shows the 
 a failed proof. It also supports the statistical choices made in `lpe report` (paired by theorem, exact
 tests, Holm). See ROADMAP item 16.
 
+## Checking infrastructure
+
+**Dos Santos, de Saxcé, Wang, Wang, Bakšys, Ünsal, Liu, Liu, Li. *Kimina Lean Server: A High-Performance Lean Server for Large-Scale Verification.* arXiv:2504.21230, 2025 (v3 December 2025; MATH-AI workshop).**
+<https://arxiv.org/abs/2504.21230>
+A REST server around the official Lean REPL for checking many proofs at once. It keeps a pool of REPL
+processes, one per core, and splits each submitted file into its imports and its body; the imports are
+the key of an LRU cache of "warm" REPLs that have already loaded them, so only the body is elaborated.
+Loading Mathlib is the dominant start-up cost, and on about 9.4k competition proofs the import cache
+roughly halves the total time (reported 1.94× on 64 cores) while near-linear scaling with cores gives
+the rest; the authors report 1.5–2× over two other Python Lean clients.
+*Relevance to this repo:* our checker pays the import cost on every candidate (`lake env lean` on a fresh
+file). The two cheap parts of this design are now in `lpe run`: a verdict cache for identical candidates
+and per-theorem parallelism (`--jobs`). The warm-REPL part is the next step for checker speed
+(ROADMAP item 18); since every candidate for a theorem shares the same truncated file prefix, a REPL
+environment per theorem would let the checker elaborate only the declaration.
+
+**Xin, Schneidman, Cummins, Ram, Ganesh, Limperg. *AXLE: A Cloud Infrastructure for Lean 4 Theorem Proving Utilities.* arXiv:2606.26442, 2026.**
+<https://arxiv.org/abs/2606.26442> (abstract read; the full text was not)
+A hosted service offering fourteen Lean metaprogramming tools, among them strict proof verification,
+declaration metadata extraction, source manipulation and deterministic proof repair and simplification,
+with per-request isolation and several Lean/Mathlib versions side by side, reachable from a Python SDK,
+a CLI and an HTTP API. The abstract motivates it by noting that existing tooling parallelizes compilation
+but not proof verification at scale.
+*Relevance to this repo:* a reminder that "strict verification" (banned tokens, axiom checks, no
+environment tampering) is a tool of its own, which our `lean_check.py` reimplements by hand; and its
+proof-simplification utilities could normalize rebuilt proofs before comparing them with the original.
+Not usable here directly, since the workspace cannot reach outside services.
+
+**Shen, Shi. *Keep the Proof State Live: Snapshotting for Efficient Tactic Search in Lean 4.* arXiv:2605.25556, 2026.**
+<https://arxiv.org/abs/2605.25556> (abstract read; the full text was not)
+Measures where time goes when many proof branches are explored from one partially written proof:
+loading imports (about a minute per branch in their setting) and re-elaborating the theorem up to the
+target goal together take over 99% of the wall time. Capturing the elaborated proof state once, through a
+small extension of the Lean language server, and reusing it across branches gives 5.6–50× speedups
+(median 9.7×) on miniF2F problems, and the authors stress that this is complementary to import caching.
+*Relevance to this repo:* step-level reconstruction (ROADMAP item 4) and richer contrasts (item 15)
+re-elaborate the same proof prefix for every candidate sub-proof. `lean/TryTactics.lean` already does the
+snapshot idea inside one Lean run (alternatives are tried on saved proof states); step-level rebuild
+should be built the same way, with all candidates for a node checked in one elaboration of the prefix,
+rather than one file per candidate.
+
 ## Not yet read / to follow up
 
 - arXiv:2603.24372 (formal–informal translation; the page could not be fetched on 2026-11-23).
