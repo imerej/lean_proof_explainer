@@ -45,9 +45,13 @@ item numbers are kept, so the log can refer to them.
 9. **Held-out theorems.** Theorems added to Mathlib after the models' training cut-off, found by
    `git log` dates in the Mathlib checkout, to separate explanation from memorisation.
 
-10. **Training groundwork.** Export (proof, explanation, rebuild success, leakage) as JSONL with
-    reward = success − λ·leakage; best-of-n explanation selection; distillation loop as in the chess
-    recipe.
+10. **Distillation loop.** `lpe export` (see Done) writes rewarded explanations, best-of-n SFT examples
+    with the one-pass `flat` prompt as input, and preference pairs. Still missing: (a) several explanation
+    samples per theorem and strategy (an explainer `--explanations N` with distinct sample indices, so
+    best-of-n chooses among more than the strategies); (b) a fine-tuning run of a small open explainer on
+    the `sft` export, then (c) a second round in which the fine-tuned model is the explainer, as in the
+    chess recipe. *Measure:* masked rebuild success of the fine-tuned one-pass explainer against the
+    teacher's `flat` and `recursive` on held-out theorems (item 9), at equal leakage.
 
 11. **Waypoint agreement.** Formalize the intermediate claims of an explanation and compare them with the
     real goal chain now available from `lpe goals` (how many explanation claims match a goal the proof
@@ -97,6 +101,19 @@ item numbers are kept, so the log can refer to them.
     per check on the pilot against the cold checker, with identical verdicts on a set of right and wrong
     candidates.
 
+19. **Paraphrase-aware leakage before any RL.** The leak rate matches lemma names verbatim, so an
+    explainer optimised on the export's reward could learn to paraphrase names (`add_pow` as "add-pow")
+    or spell tactics in prose. Sorg et al. 2025 show type-check rewards being gamed the same way. Add a
+    normalised match (case, separators, dot components) and report the gap between masked and unmasked
+    rebuild per explanation; use the masked success in the reward (a reward variant `success_masked`).
+    *Measure:* leak rate under the normalised match vs. the verbatim one on the pilot explanations; how
+    often an explanation rebuilds unmasked but not masked.
+
+20. **Reward design check.** Before training on the export, compare reward variants (linear λ, the
+    leak gate of CARD (Luo et al. 2026), masked success) by how they rank the pilot's explanations against
+    a small human rating of the same explanations (the readability rubric is still to be written).
+    *Measure:* rank correlation of each variant with the human rating.
+
 ## Done
 
 - 2026-11-23 — `scripts/setup_lean.sh`: toolchain from GitHub releases + build of the benchmark's
@@ -115,3 +132,6 @@ item numbers are kept, so the log can refer to them.
 - 2026-11-27 — Checker cache (`.cache/check/`, keyed by the compiled file, toolchain and Lake manifest;
   machine failures never cached and reported as `environment`/`crash`/`timeout`) and `run --jobs` /
   `sanity --jobs` for per-theorem parallelism.
+- 2026-11-28 — `lpe export` (`lpe/dataset.py`): result rows pooled into candidate explanations with
+  reward = success − λ·leak − μ·[Lean notation] (optional leak gate); `records`, best-of-n `sft` (flat
+  prompt as input) and preference `pairs` formats; result rows now store `statement` and `proof`.

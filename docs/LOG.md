@@ -275,3 +275,56 @@ One entry per working session, newest last. Dates are Korea time.
   measure seconds per check against the cold checker; the cache only helps repeated candidates.
 - When an API key is available: run the pilot with all six strategies and `--jobs 2`, and record the
   cache hit rate of a real rebuilder.
+
+## 2026-11-28 (Sat) — `lpe export`: rewards, best-of-n, preference pairs
+
+**Changed**
+
+- New `lpe/dataset.py` and `lpe export`, the first piece of ROADMAP item 10. Result rows become
+  *candidate explanations*, one per (theorem, explanation text); rows with the same text (the same
+  explanation rebuilt by another run or rebuilder) are pooled. Only explanations written about the theorem
+  count (`flat`, `recursive`, `grounded`, `contrastive`); masked rows are left out unless
+  `--include-masked`, because their text was edited after the explainer wrote it. Each candidate gets
+  reward = success − λ·leak_rate − μ·[Lean notation], where success is the fraction of successful samples
+  when the run drew all samples and 0/1 otherwise. `--leak-gate g` withholds the success credit from
+  explanations leaking more than a fraction g of the proof's lemma names, after the leakage gate in CARD
+  (Luo et al. 2026): with a linear penalty alone, a rebuilt proof outweighs heavy copying.
+- Three formats: `records` (every candidate and the fields behind its reward), `sft` (best-of-n: the
+  best candidate per theorem, if its reward reaches `--min-reward`, as a chat example) and `pairs`
+  (chosen/rejected explanations of one theorem whose rewards differ by at least `--min-margin`; equal
+  rewards never pair). The input of `sft` and `pairs` is exactly the one-pass `flat` prompt (now
+  `explain.flat_prompt`), so explanations built bottom-up over the proof tree become targets for a
+  one-pass explainer: the distillation half of the chess recipe (Bhaskar et al. 2026). `--skip-easy`
+  drops theorems that the `none` baseline rebuilt, since they say little about any explanation.
+- `run` rows now store `statement` (in context) and `proof`, so an export needs no Mathlib checkout;
+  older rows are completed from the benchmark with `--bench`.
+- `docs/literature.md`: new section on rewards for training explainers and formalizers (CARD, read in
+  part; FormaRL and Sorg et al. 2025 from abstract/workshop pages only). The Sakana "RL teachers" paper
+  (arXiv:2506.08388), the closest analogue of a rebuild reward, could not be fetched and is listed under
+  follow-ups. ROADMAP: item 10 narrowed to the remaining distillation loop; new items 19 (paraphrase-aware
+  leakage before any RL, since a verbatim-match leak penalty invites paraphrased lemma names) and 20
+  (choose among reward variants against a human rating).
+
+**Verified**
+
+- `python3 -m pytest -q`: 63 passed with Lean built (58 + 5 skipped without). New tests: the success
+  score and reward (including the gate), pooling of identical texts and exclusion of `none`/`decoy`/masked
+  rows, best-of-n with its tie-break (shorter explanation), preference pairs at two margins, that the SFT
+  input equals the `flat` prompt, the `--bench` fallback for old rows, and an offline `run` + `export` in
+  all three formats with mock models and a fake checker.
+- `python3 -m lpe sanity benchmarks/pilot.toml --jobs 2`: all 12 ok, after rebuilding the pilot closure
+  from a fresh checkout with `scripts/setup_lean.sh`.
+- Smoke run with the real Lean checker on all 12 pilot theorems, `none,flat,recursive`, `--mask both
+  --samples 2 --all-samples --feedback 0 --jobs 2`, mock models (the rebuilder writes the original proof
+  only for four theorems and only when given the bottom-up explanation): 120 Lean runs, `report` shows
+  `recursive` 4/12 and the others 0/12; `export` gives 24 candidates, 4 `sft` examples (all `recursive`,
+  reward 1.0) and 4 pairs. This checks the plumbing only. No model API key was available, so there is still
+  no real data to export.
+
+**Next**
+
+- Sunday (consolidation): README/ROADMAP read-through against the code; `cli.py` is now ~600 lines and
+  `cmd_run`'s row building could move into its own function shared with tests.
+- Item 10(a): several explanation samples per theorem (`--explanations N`), so best-of-n is a real
+  selection rather than a choice among strategies; the check cache keeps the extra rebuilds affordable.
+- Item 19: normalised leak matching, before anyone trains on the reward.

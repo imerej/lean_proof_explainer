@@ -271,9 +271,47 @@ snapshot idea inside one Lean run (alternatives are tried on saved proof states)
 should be built the same way, with all candidates for a node checked in one elaboration of the prefix,
 rather than one file per candidate.
 
+## Rewards for training explainers and formalizers
+
+**Luo, Mao, Qin, Liu, Li, Zhang, Gao, Chen, Wang. *From Solver Trajectories to Teaching Trajectories: Cognition-Aligned Reasoning Distillation* (CARD). arXiv:2610.36445, 2026.**
+<https://arxiv.org/abs/2610.36445>
+A small "reformatter" is trained with GRPO to rewrite a large teacher's reasoning traces into versions a
+small student learns from more easily; the final answer is kept and only traces with detected failed steps
+are rewritten. The reward multiplies three parts: a rule-based leakage gate (zero if the rewrite talks
+about editing the original), a coherence gate (a judge finds no failed step) and a score of how well the
+rewrite fits the student's own distribution while keeping the answer likely. Students fine-tuned on the
+rewritten traces improve over plain distillation on maths benchmarks, and much more on out-of-domain ones
+(for Qwen2.5-7B, the reported general average rises from 56.3 to 71.1). Read in part (first third verbatim).
+*Relevance to this repo:* the same shape as our reward: a usefulness term measured *on the reader*
+(here, rebuild success) gated by a leakage term. Two ideas to borrow: make leakage a gate rather than a
+linear penalty when it signals copying (an explanation above a leak threshold gets reward 0 whatever it
+rebuilt), and rewrite only the explanations that failed, as in ROADMAP item 5.
+
+**Huang, Jin, Liang, Li, Liu. *FormaRL: Enhancing Autoformalization with no Labeled Data.* arXiv:2508.18914, 2025.**
+<https://arxiv.org/abs/2508.18914>
+Reinforcement learning (GRPO) for statement autoformalization from unlabeled problems only: the reward
+combines Lean's syntax check with an LLM check that the formal statement says the same as the informal
+one. With 859 unlabeled problems, a 7B coder model's ProofNet pass@1 rises from about 4% to 26%. The
+authors also release *uproof*, undergraduate proof problems. Abstract only.
+*Relevance to this repo:* the inverse direction of ours, with a weaker signal (compiling plus a judge);
+a rebuilt proof that Lean accepts is a stronger check, so a few hundred benchmark theorems may already
+be enough data for a first RL experiment on the explainer.
+
+**Sorg, Li, Banerjee. *Online Reinforcement Learning for Autoformalization.* NeurIPS 2025 workshop (Multimodal Algorithmic Reasoning), poster.**
+<https://neurips.cc/virtual/2025/130519>
+Argues that a type-check reward alone is gamed: the formalizer learns statements that compile but say
+nothing. Combines the type check with a semantic reward (exact-match BEq/BEq+ when a reference exists,
+embedding similarity when not), trains with GRPO, and reports that the KL penalty matters. Read from the
+workshop page only.
+*Relevance to this repo:* the same failure mode threatens a rebuild reward: an explainer can raise
+rebuild success by leaking the proof. Our reward subtracts the leak rate and Lean notation, but the
+lexical leak measure can be evaded by paraphrasing lemma names; the masked rebuild and a
+paraphrase-aware leak check (ROADMAP item 19) are the guards to add before any RL run.
+
 ## Not yet read / to follow up
 
 - arXiv:2603.24372 (formal–informal translation; the page could not be fetched on 2026-11-23).
 - *Do Chess Explanations Reflect Model Decisions? Behavioral and Token-Level Tests of LLM Reasoning Faithfulness*, NeurIPS 2026 (<https://neurips.cc/virtual/2026/169063>): counterfactual tests of explanation faithfulness in chess.
 - The leanprover-community `repl` (tactic mode with proof-state ids), as an alternative to Pantograph for step-level rebuilds.
 - Quan, Valentino, Dennis, Freitas. *Faithful and Robust LLM-Driven Theorem Proving for NLI Explanations*, arXiv:2505.24264 (prover-feedback refinement of explanations; relevant to iterative refinement).
+- *Reinforcement Learning Teachers of Test Time Scaling*, arXiv:2506.08388 (teachers rewarded by how well a student can follow their explanation of a known solution; the closest published analogue of a rebuild reward; the page could not be fetched on 2026-11-28).
