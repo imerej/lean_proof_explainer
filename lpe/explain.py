@@ -97,8 +97,8 @@ def explain(
     if llm is None:
         raise ValueError(f"strategy {strategy!r} needs an explainer model")
     if strategy == "flat":
-        user = f"Theorem:\n```lean\n{decl.statement_in_context}\n```\n\nProof:\n```lean\n{decl.proof}\n```"
-        return Explanation("flat", llm.chat(FLAT_SYSTEM, user), calls=1)
+        system, user = flat_prompt(decl)
+        return Explanation("flat", llm.chat(system, user), calls=1)
     if strategy == "recursive":
         return _recursive(decl, llm, min_children)
     if strategy == "grounded":
@@ -117,6 +117,15 @@ def explain(
     if strategy == "decoy":
         raise ValueError("the decoy strategy needs a donor theorem; use decoy_explanation()")
     raise ValueError(f"unknown strategy {strategy!r}")
+
+
+def flat_prompt(decl: Declaration) -> tuple[str, str]:
+    """(system, user) prompt of the one-pass `flat` explainer.
+
+    Also the input side of exported training examples (`lpe export`), so that explanations built
+    by the costlier strategies can be distilled into a one-pass explainer with exactly this prompt.
+    """
+    return FLAT_SYSTEM, f"Theorem:\n```lean\n{decl.statement_in_context}\n```\n\nProof:\n```lean\n{decl.proof}\n```"
 
 
 def decoy_explanation(donor: Declaration, llm: LLM | None) -> Explanation:

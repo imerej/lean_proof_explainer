@@ -137,6 +137,26 @@ python -m lpe select --out benchmarks/my_set.toml --n 50 --min-lines 12 --max-li
     --under Mathlib/NumberTheory                   # sample a new benchmark
 ```
 
+Training data. `export` turns result files into data for training an explainer:
+
+```bash
+python -m lpe export results/pilot.jsonl --format records --out data/candidates.jsonl
+python -m lpe export results/pilot.jsonl --format sft   --out data/sft.jsonl   --skip-easy
+python -m lpe export results/pilot.jsonl --format pairs --out data/pairs.jsonl --min-margin 0.5
+```
+
+Each explanation of a theorem (unmasked rows of `flat`, `recursive`, `grounded`, `contrastive`; rows with
+identical text are pooled) gets **reward = success − λ·leak_rate − μ·[Lean notation]** (`--lam`, default
+0.5; `--notation-penalty`, default 0). Success is the fraction of successful samples when the run used
+`--all-samples`, otherwise 0/1. `--leak-gate g` gives no success credit to an explanation that leaks more
+than a fraction g of the proof's lemma names. `records` lists every candidate with its reward; `sft` keeps
+the best explanation per theorem (if its reward reaches `--min-reward`, default 0.5) as a chat example
+whose input is the one-pass `flat` prompt, so explanations built bottom-up can be distilled into a
+one-pass explainer; `pairs` writes (chosen, rejected) explanations of the same theorem whose rewards
+differ by at least `--min-margin`. `--skip-easy` drops theorems the rebuilder proved with no
+explanation. Result rows written by older versions lack the statement and proof; pass `--bench` for them.
+No training is done here, and no real export exists yet: the pilot has not been run with real models.
+
 Goal states come from `lean/GoalStates.lean`, a small Lean program that elaborates the theorem's file
 (truncated after the theorem, as the checker sees it) with info trees enabled and prints the goals before
 and after every tactic, the same data the editor's infoview shows. They are cached in `.cache/goals/`.
@@ -177,9 +197,10 @@ lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-erro
 lpe/lean_check.py   splice a candidate into its original file and compile it; verdict cache
 lpe/cachefile.py    atomic writes for the on-disk caches (safe with `run --jobs`)
 lpe/stats.py        intervals, paired tests and pass@k for `lpe report`
+lpe/dataset.py      rewards, best-of-n and preference pairs for `lpe export`
 lpe/llm.py          small Anthropic / OpenAI-compatible clients with an on-disk cache
 lpe/imports.py      import closures, to pick theorems that are cheap to check
-lpe/cli.py          select · sanity · explain · goals · contrast · run · report
+lpe/cli.py          select · sanity · explain · goals · contrast · run · report · export
 benchmarks/         theorem lists (TOML)
 scripts/            setup_lean.sh: toolchain + Mathlib build without the release/cache servers
 docs/               ROADMAP.md (planned work), LOG.md (what changed when), literature.md

@@ -13,6 +13,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import dataset
 from .contrast import DEFAULT_ALTERNATIVES, ContrastRunner, probe_targets, render_verdicts, verdict_summary
 from .explain import decoy_explanation, explain, leakage, mask_identifiers, pick_donor
 from .extract import find_declaration, parse_proof_tree
@@ -297,6 +298,8 @@ def cmd_run(args) -> None:
                     "proof_identifiers": leak.identifiers_total,
                     "lean_notation": leak.notation,
                     "explanation": text,
+                    "statement": decl.statement_in_context,
+                    "proof": decl.proof,
                     "trace": ex.trace,
                     "final_proof": rec.attempts[-1].proof if rec.attempts else "",
                     "seconds": round(time.monotonic() - t0, 1),
@@ -423,6 +426,43 @@ def cmd_report(args) -> None:
         )
 
 
+# ------------------------------------------------------------------ export
+
+
+def cmd_export(args) -> None:
+    """Turn result rows into training data: scored candidates, best-of-n SFT examples or
+    preference pairs (see `lpe/dataset.py`)."""
+    rows = [json.loads(line) for p in args.results for line in Path(p).read_text(encoding="utf-8").splitlines()]
+    lookup = None
+    if args.bench:
+        decls = {entry["name"]: decl for entry, decl in load_bench(Path(args.bench), args.project)}
+
+        def lookup(theorem: str, _file: str) -> tuple[str, str]:
+            if theorem not in decls:
+                raise ValueError(f"{theorem} is not in {args.bench}")
+            return decls[theorem].statement_in_context, decls[theorem].proof
+
+    cfg = dataset.RewardConfig(lam=args.lam, notation_penalty=args.notation_penalty, leak_gate=args.leak_gate)
+    cands = dataset.candidates(rows, cfg, include_masked=args.include_masked, lookup=lookup)
+    if args.format == "records":
+        records = [c.record() for c in cands]
+    elif args.format == "sft":
+        records = [dataset.sft_example(c) for c in dataset.best_of_n(cands, args.min_reward, args.skip_easy)]
+    else:
+        records = [dataset.pair_example(a, b) for a, b in dataset.preference_pairs(cands, args.min_margin, args.skip_easy)]
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    theorems = {c.theorem for c in cands}
+    easy = {c.theorem for c in cands if c.baseline}
+    print(
+        f"{len(rows)} rows -> {len(cands)} candidate explanations of {len(theorems)} theorems"
+        f" ({len(easy)} rebuilt without an explanation); wrote {len(records)} {args.format} lines to {out}"
+    )
+
+
 # ------------------------------------------------------------------ main
 
 
@@ -528,6 +568,28 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("report", help="summarise result files")
     s.add_argument("results", nargs="+")
     s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("export", help="write training data (rewarded explanations, best-of-n, preference pairs)")
+    s.add_argument("results", nargs="+")
+    s.add_argument("--out", required=True)
+    s.add_argument(
+        "--format",
+        choices=["records", "sft", "pairs"],
+        default="records",
+        help="records: every candidate with its reward; sft: best explanation per theorem as a chat example "
+        "with the flat prompt; pairs: (chosen, rejected) explanations of the same theorem",
+    )
+    s.add_argument("--lam", type=float, default=0.5, help="reward = success - LAM * leak_rate - ...")
+    s.add_argument("--notation-penalty", type=float, default=0.0, help="subtracted when Lean-only notation appears")
+    s.add_argument(
+        "--leak-gate", type=float, default=None, help="leak rate above which a rebuild earns no success credit"
+    )
+    s.add_argument("--min-reward", type=float, default=0.5, help="sft: keep a theorem's best only if it reaches this")
+    s.add_argument("--min-margin", type=float, default=0.5, help="pairs: minimum reward difference")
+    s.add_argument("--skip-easy", action="store_true", help="sft/pairs: drop theorems rebuilt with no explanation")
+    s.add_argument("--include-masked", action="store_true", help="also use masked rows (text with [lemma] holes)")
+    s.add_argument("--bench", help="benchmark file, for rows written before rows carried statement and proof")
+    s.set_defaults(fn=cmd_export)
 
     args = p.parse_args(argv)
     args.fn(args)
