@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 import threading
 import time
@@ -13,7 +14,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import dataset
+from . import dataset, results
 from .contrast import DEFAULT_ALTERNATIVES, ContrastRunner, probe_targets, render_verdicts, verdict_summary
 from .explain import decoy_explanation, explain, leakage, mask_identifiers, pick_donor
 from .extract import find_declaration, parse_proof_tree
@@ -21,7 +22,13 @@ from .goals import GoalExtractor, render_goals, step_view
 from .lean_check import LeanChecker
 from .llm import LLM
 from .reconstruct import reconstruct
-from .stats import holm, mcnemar_exact, paired_bootstrap_ci, row_pass_at_k, wilson_interval
+from .stats import (
+    holm,
+    mcnemar_exact,
+    paired_bootstrap_ci,
+    row_pass_at_k,
+    wilson_interval,
+)
 
 DEFAULT_PROJECT = Path(__file__).resolve().parent.parent / "lean"
 
@@ -54,8 +61,6 @@ def cmd_select(args) -> None:
         print(f"{len(files)} files have at most {args.max_imports} package modules in their import closure")
     rng = random.Random(args.seed)
     rng.shuffle(files)
-    import re
-
     picked = []
     name_re = re.compile(r"^(?:theorem|lemma)\s+([^\s:({\[]+)", re.M)
     for f in files:
@@ -86,9 +91,9 @@ def cmd_sanity(args) -> None:
     Never uses the check cache: the point is to test the Lean build as it is now."""
     checker = LeanChecker(args.project, timeout=args.timeout)
     bench = list(load_bench(Path(args.bench), args.project))
-    results = _for_each(bench, lambda item: checker.check(item[1], item[1].proof), args.jobs)
+    verdicts = _for_each(bench, lambda item: checker.check(item[1], item[1].proof), args.jobs)
     bad = 0
-    for (entry, decl), res in zip(bench, results):
+    for (entry, decl), res in zip(bench, verdicts):
         status = "ok " if res.ok else "BAD"
         bad += not res.ok
         print(f"{status} {res.seconds:6.1f}s  {entry['name']}  ({decl.line_count} lines)  {res.reason}")
@@ -210,6 +215,30 @@ def _print_check_stats(checker) -> None:
         )
 
 
+def _explanation_for(i: int, strategy: str, bench, files, explainer, goals, runner, args):
+    """The explanation of theorem `i` under `strategy`, or a one-line reason why it cannot be made
+    (no goal states or no verdicts for `grounded`/`contrastive`)."""
+    decl = bench[i][1]
+    if strategy == "decoy":
+        return decoy_explanation(bench[pick_donor(files, i)][1], explainer), None
+    if strategy not in ("grounded", "contrastive"):
+        return explain(decl, strategy, explainer, min_children=args.min_children), None
+    states = goals.states(decl)
+    if states.error:
+        return None, "no goal states: " + _first_line(states.error)
+    contrasts = None
+    if strategy == "contrastive":
+        contrasts = runner.contrasts(decl, states, args.min_children)
+        if contrasts.error:
+            return None, "no verdicts: " + _first_line(contrasts.error)
+    ex = explain(decl, strategy, explainer, min_children=args.min_children, states=states, contrasts=contrasts)
+    return ex, None
+
+
+def _first_line(text: str) -> str:
+    return (text.strip().splitlines() or ["?"])[0]
+
+
 def cmd_run(args) -> None:
     project = args.project
     checker = LeanChecker(project, timeout=args.timeout, cache_dir=_check_cache(args))
@@ -222,9 +251,10 @@ def cmd_run(args) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     done = set()
     if out.exists() and not args.overwrite:
-        for line in out.read_text(encoding="utf-8").splitlines():
-            r = json.loads(line)
-            done.add((r["theorem"], r["strategy"], r["masked"]))
+        repaired = results.repair_tail(out)
+        if repaired:
+            print(f"{out}: {repaired}", flush=True)
+        done = {results.row_key(r) for r in results.read_rows(out)}
 
     bench = list(load_bench(Path(args.bench), project))
     files = [entry["file"] for entry, _ in bench]
@@ -240,30 +270,13 @@ def cmd_run(args) -> None:
                 # baseline and for a decoy explanation written about another theorem.
                 if strategy in ("none", "decoy") and masked:
                     continue
-                key = (entry["name"], strategy, masked)
-                if key in done:
+                if (entry["name"], strategy, masked) in done:
                     continue
                 t0 = time.monotonic()
-                if strategy == "decoy":
-                    ex = decoy_explanation(bench[pick_donor(files, i)][1], explainer)
-                elif strategy in ("grounded", "contrastive"):
-                    states = goals.states(decl)
-                    if states.error:
-                        first = (states.error.strip().splitlines() or ["?"])[0]
-                        print(f"! {entry['name']:<40} {strategy:<10} skipped, no goal states: {first}", flush=True)
-                        continue
-                    contrasts = None
-                    if strategy == "contrastive":
-                        contrasts = runner.contrasts(decl, states, args.min_children)
-                        if contrasts.error:
-                            first = (contrasts.error.strip().splitlines() or ["?"])[0]
-                            print(f"! {entry['name']:<40} {strategy:<10} skipped, no verdicts: {first}", flush=True)
-                            continue
-                    ex = explain(
-                        decl, strategy, explainer, min_children=args.min_children, states=states, contrasts=contrasts
-                    )
-                else:
-                    ex = explain(decl, strategy, explainer, min_children=args.min_children)
+                ex, skipped = _explanation_for(i, strategy, bench, files, explainer, goals, runner, args)
+                if ex is None:
+                    print(f"! {entry['name']:<40} {strategy:<10} skipped, {skipped}", flush=True)
+                    continue
                 text = mask_identifiers(decl, ex.text) if masked else ex.text
                 leak = leakage(decl, text)
                 rec = reconstruct(
@@ -275,35 +288,22 @@ def cmd_run(args) -> None:
                     feedback_rounds=args.feedback,
                     all_samples=args.all_samples,
                 )
-                row = {
-                    "theorem": entry["name"],
-                    "file": entry["file"],
-                    "proof_lines": decl.line_count,
-                    "strategy": strategy,
-                    "masked": masked,
-                    "explainer": args.explainer if strategy != "none" else None,
-                    "reconstructor": args.reconstructor,
-                    "success": rec.success,
-                    "first_success": rec.first_success,
-                    "samples": args.samples,
-                    "feedback": args.feedback,
-                    "all_samples": args.all_samples,
-                    "sample_success": rec.sample_success,
-                    "attempts": len(rec.attempts),
-                    "failure_reasons": [a.result.reason for a in rec.attempts if not a.result.ok],
-                    "explainer_calls": ex.calls,
-                    "explanation_chars": len(text),
-                    "leak_rate": round(leak.rate, 3),
-                    "leaked_identifiers": leak.identifiers_leaked,
-                    "proof_identifiers": leak.identifiers_total,
-                    "lean_notation": leak.notation,
-                    "explanation": text,
-                    "statement": decl.statement_in_context,
-                    "proof": decl.proof,
-                    "trace": ex.trace,
-                    "final_proof": rec.attempts[-1].proof if rec.attempts else "",
-                    "seconds": round(time.monotonic() - t0, 1),
-                }
+                row = results.make_row(
+                    entry,
+                    decl,
+                    strategy,
+                    masked,
+                    ex,
+                    text,
+                    leak,
+                    rec,
+                    explainer=args.explainer,
+                    reconstructor=args.reconstructor,
+                    samples=args.samples,
+                    feedback=args.feedback,
+                    all_samples=args.all_samples,
+                    seconds=time.monotonic() - t0,
+                )
                 mark = "✓" if rec.success else "✗"
                 with lock:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -342,7 +342,7 @@ def _label(key: tuple) -> str:
 
 
 def cmd_report(args) -> None:
-    rows = [json.loads(line) for p in args.results for line in Path(p).read_text(encoding="utf-8").splitlines()]
+    rows = results.read_all(args.results)
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         groups[(r["strategy"], r["masked"])].append(r)
@@ -432,7 +432,7 @@ def cmd_report(args) -> None:
 def cmd_export(args) -> None:
     """Turn result rows into training data: scored candidates, best-of-n SFT examples or
     preference pairs (see `lpe/dataset.py`)."""
-    rows = [json.loads(line) for p in args.results for line in Path(p).read_text(encoding="utf-8").splitlines()]
+    rows = results.read_all(args.results)
     lookup = None
     if args.bench:
         decls = {entry["name"]: decl for entry, decl in load_bench(Path(args.bench), args.project)}

@@ -171,7 +171,10 @@ remaining goal is shown), or "fails" (with the first line of Lean's error). Chan
 
 All model calls are cached in `.cache/llm/`, so re-running or re-reporting is free. Each result row in
 the JSONL file keeps the full explanation, the per-node trace of the recursive pass, and the final
-candidate proof.
+candidate proof. `run` resumes an existing results file (rows already present for a theorem, strategy
+and mask setting are not redone; `--overwrite` starts afresh). If a run was interrupted half-way through
+writing a row, `report` and `export` skip that incomplete last row with a warning, and the next `run`
+removes it and redoes that row.
 
 Lean's verdict on a candidate is cached in `.cache/check/`, keyed by the exact file Lean compiles, the
 toolchain and `lean/lake-manifest.json` (so a Mathlib bump invalidates it). A rebuilder that proposes
@@ -190,10 +193,12 @@ theorem's imports loaded, so memory, not cores, is usually the limit.
 
 ```
 lpe/extract.py      find a declaration in a Lean file, split statement/proof, build the proof tree
-lpe/explain.py      explanation strategies (none / decoy / flat / recursive / grounded), leakage and masking
+lpe/explain.py      explanation strategies (none / decoy / flat / recursive / grounded / contrastive),
+                    leakage and masking
 lpe/goals.py        goal states per tactic (runs lean/GoalStates.lean), attached to proof-tree nodes
 lpe/contrast.py     routine alternatives tried at each part's goal (runs lean/TryTactics.lean)
 lpe/reconstruct.py  rebuild a proof from statement + explanation, with Lean-error feedback
+lpe/results.py      result rows: building them, reading them, repairing an interrupted write
 lpe/lean_check.py   splice a candidate into its original file and compile it; verdict cache
 lpe/cachefile.py    atomic writes for the on-disk caches (safe with `run --jobs`)
 lpe/stats.py        intervals, paired tests and pass@k for `lpe report`
