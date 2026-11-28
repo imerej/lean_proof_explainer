@@ -58,7 +58,11 @@ item numbers are kept, so the log can refer to them.
     actually passes through, up to `simp`-normalization or a short proof of equivalence). A rebuilder
     variant that first writes the claims as a chain of `have … := by sorry` and then fills the gaps
     separates "the explanation names the right waypoints" from "the rebuilder can find the tactics"
-    (Wang et al. 2025, chain of states). *Measure:* waypoint recall vs. rebuild success, per theorem.
+    (Wang et al. 2025, chain of states). Run the same comparison on the *rebuilt* proof's goal chain against the
+    original's: a compiling rebuild that passes through none of the explanation's waypoints did not follow
+    it (Bastounis et al. 2026 document Lean proofs that silently take another route than the informal
+    text). *Measure:* waypoint recall vs. rebuild success, per theorem; the share of successful rebuilds
+    that follow the original's waypoints.
 
 12. **Leaf templates.** Describe leaves with stereotyped meaning (`rw`, `simp only`, `obtain`, `intro`,
     `constructor`) from their before/after states with a fixed template instead of a model call, as in
@@ -113,6 +117,14 @@ item numbers are kept, so the log can refer to them.
     leak gate of CARD (Luo et al. 2026), masked success) by how they rank the pilot's explanations against
     a small human rating of the same explanations (the readability rubric is still to be written).
     *Measure:* rank correlation of each variant with the human rating.
+
+21. **Dense rebuild score.** Score an explanation by the mean and minimum per-token log-probability of
+    the original proof under an open rebuilder that is given statement + explanation (Cetin et al. 2025),
+    alongside binary rebuild success; and score leakage as the explanation's surprise to the same model
+    when it has *not* seen the proof (their KL term), which needs no lemma list. Needs an OpenAI-compatible
+    endpoint that returns prompt log-probabilities (e.g. a local vLLM server). *Measure:* correlation of
+    the dense score with rebuild success over the pilot's explanations; whether it separates `decoy` from
+    `flat` on theorems that neither rebuilds.
 
 ## Done
 

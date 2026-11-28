@@ -66,6 +66,21 @@ uses the score as a decoding reward.
 explanations: extract the intermediate claims an explanation states, formalize each, and check that each
 is provable from the hypotheses (a claim-level score, finer than whole-proof rebuild).
 
+**Bastounis, Circelli, Hansen. *Navier-Stokes lost in translation: Why Lean verification of AI autoformalisation does not guarantee correct natural language proofs.* arXiv:2610.08144, 2026.**
+<https://arxiv.org/abs/2610.08144>
+Argues, with small worked examples and a case study of a recently announced Navier–Stokes formalization,
+that a compiling Lean proof certifies only itself, not the informal proof it was produced from. The
+documented failure modes: a wrong informal proof whose "translation" compiles because it silently uses
+different facts; a correct informal proof whose Lean version takes another route (symmetry instead of
+diagonalization); Lean statements weaker than the informal claims (one more derivative assumed); and a
+revise-until-it-compiles loop that never checks whether the reasoning was kept, so it is rewarded for
+finding a *different* proof. The authors also argue that faithful translation is undecidable in general.
+*Relevance to this repo:* our rebuild test has exactly this blind spot: a rebuilt proof that compiles
+may not follow the explanation at all (the rebuilder found its own route, or repair rounds drifted
+away). Success should be complemented by a "followed the explanation" check: compare the rebuilt proof's
+structure and goal chain with the original's (ROADMAP item 11), and report how often successful rebuilds
+only arrive after repair rounds that change the overall plan.
+
 ## Informalization of Mathlib
 
 **Gao, Wang, Jiang, Gao, Qin, Xu, Dong. *Herald: A Natural Language Annotated Lean 4 Dataset.* ICLR 2025. arXiv:2410.10878.**
@@ -308,10 +323,27 @@ rebuild success by leaking the proof. Our reward subtracts the leak rate and Lea
 lexical leak measure can be evaded by paraphrasing lemma names; the masked rebuild and a
 paraphrase-aware leak check (ROADMAP item 19) are the guards to add before any RL run.
 
+**Cetin, Zhao, Tang. *Reinforcement Learning Teachers of Test Time Scaling.* arXiv:2506.08388, 2025.**
+<https://arxiv.org/abs/2506.08388>
+A 7B "teacher" is given both a problem and its known solution and trained with GRPO to write the
+step-by-step explanation connecting them; it never has to solve anything. The reward is dense and comes
+from a small student model: the student's log-likelihood of the solution after reading the question and
+the explanation (token mean plus a weighted token minimum, so no part of the solution is left
+unexplained), minus a KL term that asks each explanation token to be plausible to a student who has
+*not* seen the solution. The KL term is the paper's guard against explanations that simply restate the
+answer. Students distilled from the raw teacher outputs match or beat students distilled from
+post-processed traces of much larger reasoning models (7B: 49.5 vs 46.6 averaged over AIME24, MATH500 and
+GPQA Diamond). Read in part from the HTML version (method and main table).
+*Relevance to this repo:* this is the closest published version of our setup, with "rebuild" softened
+into a likelihood. Two ideas: (1) a dense rebuild score, the mean and minimum per-token log-probability
+of the *original* proof under an open rebuilder given statement + explanation, which rewards partial
+help where binary rebuild success gives 0; (2) a leakage measure that needs no lemma list: how surprising
+the explanation is to a reader who has not seen the proof, which also catches paraphrased lemma names
+(ROADMAP items 19 and 21).
+
 ## Not yet read / to follow up
 
 - arXiv:2603.24372 (formal–informal translation; the page could not be fetched on 2026-11-23).
 - *Do Chess Explanations Reflect Model Decisions? Behavioral and Token-Level Tests of LLM Reasoning Faithfulness*, NeurIPS 2026 (<https://neurips.cc/virtual/2026/169063>): counterfactual tests of explanation faithfulness in chess.
 - The leanprover-community `repl` (tactic mode with proof-state ids), as an alternative to Pantograph for step-level rebuilds.
 - Quan, Valentino, Dennis, Freitas. *Faithful and Robust LLM-Driven Theorem Proving for NLI Explanations*, arXiv:2505.24264 (prover-feedback refinement of explanations; relevant to iterative refinement).
-- *Reinforcement Learning Teachers of Test Time Scaling*, arXiv:2506.08388 (teachers rewarded by how well a student can follow their explanation of a known solution; the closest published analogue of a rebuild reward; the page could not be fetched on 2026-11-28).

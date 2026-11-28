@@ -328,3 +328,52 @@ One entry per working session, newest last. Dates are Korea time.
 - Item 10(a): several explanation samples per theorem (`--explanations N`), so best-of-n is a real
   selection rather than a choice among strategies; the check cache keeps the extra rebuilds affordable.
 - Item 19: normalised leak matching, before anyone trains on the reward.
+
+## 2026-11-29 (Sun) — consolidation: result files survive interrupted runs
+
+**Changed**
+
+- New `lpe/results.py`. The row that `run` writes is now built by `results.make_row` instead of inline
+  in `cmd_run`, and the choice of explanation for a strategy (decoy donor, goal states and verdicts for
+  `grounded`/`contrastive`, with the skip reason when they are missing) is one function,
+  `cli._explanation_for`. `cmd_run` shrank by about 40 lines; the rows are unchanged.
+- Fixed: a run interrupted while writing a row (rows with a trace are larger than the file buffer, so one
+  `write` can reach the disk in pieces) left half a JSON line at the end of the results file. `report` and
+  `export` then crashed, and a resumed `run` crashed too, or, had it got past that, would have glued its
+  next row onto the fragment. Now `results.read_rows` skips an unparsable *last* line without a trailing
+  newline with a warning (any other bad line is still an error, with file and line number), and `run`
+  calls `results.repair_tail` before appending: the fragment is cut off, or a complete last row that only
+  lacks its newline gets one. `report`, `export` and the resume check share the same reader.
+- Small clean-ups: `import re` moved to the top of `cli.py`; the local `results` in `cmd_sanity` renamed so
+  it does not shadow the new module. README: the resume behaviour is described, the layout lists
+  `results.py`, and `explain.py`'s strategy list includes `contrastive`.
+- `docs/literature.md`: Cetin, Zhao & Tang 2025 (RL teachers; the follow-up from last night, now read in
+  part) and Bastounis, Circelli & Hansen 2026 (Lean-verified formalizations that do not follow the
+  informal proof). ROADMAP: item 11 now also compares the *rebuilt* proof's goal chain with the
+  original's, since a compiling rebuild may not have followed the explanation; new item 21 (a dense rebuild
+  score from the rebuilder's log-probability of the original proof, and a lemma-list-free leakage score in
+  the style of the RL-teacher KL term).
+
+**Verified**
+
+- `python3 -m pytest -q`: 67 passed with Lean built (62 passed, 5 skipped without). New
+  `tests/test_results.py`: blank lines and a partial last row are skipped, a bad line elsewhere (or a
+  broken line that does end in a newline) is an error naming its line, `repair_tail` in all four cases,
+  and an offline `run` whose last row is cut in half: `report` still works and warns, and the resumed
+  `run` removes the fragment and redoes exactly that one row.
+- `python3 -m lpe sanity benchmarks/pilot.toml --jobs 2`: all 12 ok, after rebuilding the pilot closure
+  from a fresh checkout with `scripts/setup_lean.sh`.
+- Smoke run with the real Lean checker on all 12 pilot theorems, `none,flat --mask off --feedback 0
+  --jobs 2`, mock models: 24 rows; after cutting the last row to 300 bytes, `report` warned and counted 23
+  rows, the resumed run removed the fragment and redid one row (answered from the check cache), and
+  `report`/`export` read all 24. Plumbing only; no model API key was available, so still no real numbers.
+
+**Next**
+
+- Item 10(a): `--explanations N` (several explanation samples per theorem and strategy), so that best-of-n
+  in `export` is a real selection.
+- Item 19: normalised leak matching before anyone trains on the reward; item 21 offers a second,
+  name-free leakage signal once an endpoint with prompt log-probabilities is available.
+- `ruff check` with default rules reports ~30 style findings across the package (mostly import order and
+  `re.S`-style aliases); worth one mechanical clean-up commit with a project ruff config, not mixed with
+  behaviour changes.
